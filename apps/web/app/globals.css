@@ -44,6 +44,23 @@ button:disabled {
   padding: 32px 0 56px;
 }
 
+.brandBar {
+  display: flex;
+  justify-content: center;
+  padding: 6px 0 14px;
+}
+
+.brandLogo {
+  height: 64px;
+  width: auto;
+}
+
+@media (max-width: 720px) {
+  .brandLogo {
+    height: 48px;
+  }
+}
+
 .hero {
   display: flex;
   justify-content: space-between;

@@ -302,6 +302,10 @@ export function IntercomClient() {
 
   return (
     <main className="shell">
+      <header className="brandBar">
+        <img src="/mirise-logo.png" alt="MIRISE WELLMEDICAL GROUP" className="brandLogo" />
+      </header>
+
       <section className="hero">
         <div>
           <p className="eyebrow">MIRISE Intercom MVP</p>
