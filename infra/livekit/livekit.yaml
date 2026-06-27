@@ -4,6 +4,10 @@ rtc:
   tcp_port: 7881
   udp_port: 7882
   use_external_ip: false
+  # ローカル開発(同じPC上のブラウザ)で音声通路を確立するための設定。
+  # Docker内部のIPではなく 127.0.0.1 をICE候補として通知する。
+  # スマホ実機テスト時は、この値をMacのLAN IP(例: 192.168.x.x)に変更する。
+  node_ip: 127.0.0.1
 
 keys:
   devkey: devsecret
