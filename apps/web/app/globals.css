@@ -46,18 +46,18 @@ button:disabled {
 
 .brandBar {
   display: flex;
-  justify-content: center;
+  justify-content: flex-start;
   padding: 6px 0 14px;
 }
 
 .brandLogo {
-  height: 64px;
+  height: 56px;
   width: auto;
 }
 
 @media (max-width: 720px) {
   .brandLogo {
-    height: 48px;
+    height: 44px;
   }
 }
 
