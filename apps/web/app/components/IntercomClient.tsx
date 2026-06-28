@@ -31,6 +31,19 @@ type SignalMessage = {
 
 const DEFAULT_IDENTITY = "staff";
 
+// 着けるBLEボタン/リモコンが送りがちなキー。これらで送信ON/OFF(トグル)する。
+// 例: 指輪型/クリップ型リモコンは Enter・矢印・ページ送りキーを送ることが多い。
+const TOGGLE_KEY_CODES = new Set([
+  "Enter",
+  "NumpadEnter",
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "PageUp",
+  "PageDown",
+]);
+
 async function requestToken(identity: string, room: string): Promise<TokenResponse> {
   const response = await fetch("/api/token", {
     method: "POST",
@@ -293,8 +306,9 @@ export function IntercomClient() {
         void startTalking();
         return;
       }
-      // Enter = 1回で送信ON/OFF(着けるBLEボタン/リモコン向けのトグル)
-      if ((event.code === "Enter" || event.code === "NumpadEnter") && !event.repeat) {
+      // 着けるBLEボタン/リモコンが送る代表的なキーで送信ON/OFF(トグル)。
+      // 機種によって送るキーが違うため、よく使われるキーを広めに対応する。
+      if (TOGGLE_KEY_CODES.has(event.code) && !event.repeat) {
         event.preventDefault();
         void toggleTransmit();
       }
