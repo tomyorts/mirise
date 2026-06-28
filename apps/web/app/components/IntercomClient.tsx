@@ -240,6 +240,13 @@ export function IntercomClient() {
     [setMicrophone]
   );
 
+  // 「決めた時だけ流す」ためのトグル送信。1回で送信開始、もう1回で停止。
+  // 画面タップ・対応キー・イヤホンのメディアボタン(実験的)から呼ばれる。
+  const toggleTransmit = useCallback(async () => {
+    if (!localTrackRef.current) return;
+    await setMicrophone(!isMicOn);
+  }, [isMicOn, setMicrophone]);
+
   const switchRoom = useCallback(
     async (targetRoomId: string) => {
       if (targetRoomId === currentRoomIdRef.current && isConnected) return;
@@ -273,18 +280,32 @@ export function IntercomClient() {
   }, [connect, identity, sendSignal, setMicrophone, talkMode]);
 
   useEffect(() => {
+    const isTypingTarget = (target: EventTarget | null) => {
+      const tag = (target as HTMLElement | null)?.tagName;
+      return tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
+    };
+
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.code !== "Space" || event.repeat) return;
-      if (!isConnected || talkMode !== "ptt") return;
-      event.preventDefault();
-      void startTalking();
+      if (!isConnected || isTypingTarget(event.target)) return;
+      // スペース = 押している間だけ送信(ホールドPTT)
+      if (event.code === "Space" && talkMode === "ptt" && !event.repeat) {
+        event.preventDefault();
+        void startTalking();
+        return;
+      }
+      // Enter = 1回で送信ON/OFF(着けるBLEボタン/リモコン向けのトグル)
+      if ((event.code === "Enter" || event.code === "NumpadEnter") && !event.repeat) {
+        event.preventDefault();
+        void toggleTransmit();
+      }
     };
 
     const onKeyUp = (event: KeyboardEvent) => {
-      if (event.code !== "Space") return;
-      if (!isConnected || talkMode !== "ptt") return;
-      event.preventDefault();
-      void stopTalking();
+      if (!isConnected || isTypingTarget(event.target)) return;
+      if (event.code === "Space" && talkMode === "ptt") {
+        event.preventDefault();
+        void stopTalking();
+      }
     };
 
     window.addEventListener("keydown", onKeyDown);
@@ -294,7 +315,34 @@ export function IntercomClient() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [isConnected, startTalking, stopTalking, talkMode]);
+  }, [isConnected, startTalking, stopTalking, talkMode, toggleTransmit]);
+
+  // 実験的: イヤホン/リモコンのメディアボタン(再生・停止)で送信をトグル。
+  // 環境により動作しないことがある(特に iOS Safari)。ダメ元の対応。
+  useEffect(() => {
+    if (!isConnected) return;
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    const ms = navigator.mediaSession;
+    const handler = () => {
+      void toggleTransmit();
+    };
+    try {
+      ms.setActionHandler("play", handler);
+      ms.setActionHandler("pause", handler);
+      ms.setActionHandler("stop", handler);
+    } catch {
+      // 一部ブラウザは未対応
+    }
+    return () => {
+      try {
+        ms.setActionHandler("play", null);
+        ms.setActionHandler("pause", null);
+        ms.setActionHandler("stop", null);
+      } catch {
+        // noop
+      }
+    };
+  }, [isConnected, toggleTransmit]);
 
   useEffect(() => {
     return () => disconnect();
@@ -305,6 +353,12 @@ export function IntercomClient() {
       <header className="brandBar">
         <img src="/mirise-logo.png" alt="MIRISE WELLMEDICAL GROUP" className="brandLogo" />
       </header>
+
+      {isMicOn ? (
+        <div className="liveBanner" role="status">
+          🔴 送信中（マイクON）— 話し終わったら停止してください
+        </div>
+      ) : null}
 
       <section className="hero">
         <div>
@@ -402,7 +456,21 @@ export function IntercomClient() {
           押して話す
         </button>
 
-        <p className="hint">PCではスペースキー長押しでもPTTできます。診療中は患者情報を言わず、チェア番号やセット名で運用してください。</p>
+        <button
+          className={`toggleTransmit ${isMicOn ? "toggleOn" : ""}`}
+          onClick={() => void toggleTransmit()}
+          disabled={!isConnected}
+        >
+          {isMicOn ? "■ 送信中 — タップで停止" : "● タップで送信開始 / 停止"}
+        </button>
+
+        <p className="hint">
+          使い方は2通り：<br />
+          ・<strong>押して話す</strong>（上の大ボタンを押している間だけ送信。PCはスペースキー長押しでも可）<br />
+          ・<strong>タップで送信</strong>（1回タップで送信開始、もう1回で停止＝ハンズフリー向け）<br />
+          着けるBLEボタン/リモコンが「Enter」を送る場合は、それでも送信ON/OFFできます。<br />
+          ※常時ONにはしません。<strong>送信中は赤く表示</strong>されるので、終わったら必ず停止してください。診療中は患者情報を言わず、チェア番号やセット名で運用を。
+        </p>
       </section>
 
       <section className="panel">
