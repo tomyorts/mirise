@@ -247,6 +247,44 @@ h2 {
   border-color: #a20d1a;
 }
 
+.remoteTest {
+  margin-top: 16px;
+  border-top: 1px solid #e3e8f0;
+  padding-top: 12px;
+}
+
+.remoteTest summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #27354f;
+}
+
+.remoteKey {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  color: #344054;
+}
+
+.okTag {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #d9f6e5;
+  color: #0f6d3b;
+  font-weight: 700;
+}
+
+.ngTag {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #fff0d6;
+  color: #8a5a00;
+  font-weight: 700;
+}
+
 .hint {
   margin: 16px 0 0;
   color: #667085;

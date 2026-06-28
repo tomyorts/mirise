@@ -91,6 +91,7 @@ export function IntercomClient() {
   const [error, setError] = useState<string | null>(null);
   const [lastSignal, setLastSignal] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
+  const [lastKeyCode, setLastKeyCode] = useState<string | null>(null);
 
   const isConnected = connectionState === ConnectionState.Connected;
   const selectedRoomLabel = useMemo(() => getRoomLabel(roomId), [roomId]);
@@ -358,6 +359,17 @@ export function IntercomClient() {
     };
   }, [isConnected, toggleTransmit]);
 
+  // リモコン確認用: 押されたキーを常に記録(入力欄での入力中は除く)。
+  useEffect(() => {
+    const onAnyKey = (event: KeyboardEvent) => {
+      const tag = (event.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      setLastKeyCode(event.code);
+    };
+    window.addEventListener("keydown", onAnyKey);
+    return () => window.removeEventListener("keydown", onAnyKey);
+  }, []);
+
   useEffect(() => {
     return () => disconnect();
   }, [disconnect]);
@@ -485,6 +497,25 @@ export function IntercomClient() {
           着けるBLEボタン/リモコンが「Enter」を送る場合は、それでも送信ON/OFFできます。<br />
           ※常時ONにはしません。<strong>送信中は赤く表示</strong>されるので、終わったら必ず停止してください。診療中は患者情報を言わず、チェア番号やセット名で運用を。
         </p>
+
+        <details className="remoteTest">
+          <summary>🔘 リモコン/ボタンの確認（BLEリモコンが使えるかチェック）</summary>
+          <p className="hint">
+            BLEリモコンをiPhone/PCに接続してからボタンを押すと、送られたキーがここに表示されます。
+          </p>
+          <div className="remoteKey">
+            最後に押されたキー: <strong>{lastKeyCode ?? "（まだ無し）"}</strong>
+            {lastKeyCode ? (
+              TOGGLE_KEY_CODES.has(lastKeyCode) ? (
+                <span className="okTag">✅ 送信ON/OFF（タップ送信）に使えます</span>
+              ) : lastKeyCode === "Space" ? (
+                <span className="okTag">✅ 押して話す（ホールド）に使えます</span>
+              ) : (
+                <span className="ngTag">⚠️ 未対応キー — この表示を教えてください。対応を追加します</span>
+              )
+            ) : null}
+          </div>
+        </details>
       </section>
 
       <section className="panel">
