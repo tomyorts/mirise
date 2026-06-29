@@ -139,6 +139,16 @@ export function IntercomClient() {
     }
   }, []);
 
+  const logout = useCallback(async () => {
+    disconnect();
+    try {
+      await fetch("/api/logout", { method: "POST" });
+    } catch {
+      // ネットワークエラーでもログイン画面へ戻す
+    }
+    window.location.href = "/login";
+  }, [disconnect]);
+
   const connect = useCallback(
     async (targetRoomId = roomId) => {
       setError(null);
@@ -378,6 +388,9 @@ export function IntercomClient() {
     <main className="shell">
       <header className="brandBar">
         <img src="/mirise-logo.png" alt="MIRISE WELLMEDICAL GROUP" className="brandLogo" />
+        <button className="logoutButton" onClick={() => void logout()}>
+          ログアウト
+        </button>
       </header>
 
       {isMicOn ? (

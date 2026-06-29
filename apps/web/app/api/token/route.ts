@@ -1,6 +1,7 @@
 import { AccessToken } from "livekit-server-sdk";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { safeEqual, SESSION_COOKIE, verifySessionToken } from "@/app/lib/auth";
 
 const tokenRequestSchema = z.object({
   identity: z
@@ -17,6 +18,22 @@ const tokenRequestSchema = z.object({
 
 export async function POST(request: NextRequest) {
   try {
+    // 認証: ログイン済みセッション、またはネイティブアプリ用のAPIキー。
+    // INTERCOM_API_KEY を設定しない場合はログインセッションのみ許可。
+    const authSecret = process.env.AUTH_SECRET;
+    const session = authSecret
+      ? await verifySessionToken(request.cookies.get(SESSION_COOKIE)?.value, authSecret)
+      : null;
+    const intercomApiKey = process.env.INTERCOM_API_KEY;
+    const headerKey = request.headers.get("x-intercom-key");
+    const authedByKey = !!intercomApiKey && !!headerKey && safeEqual(headerKey, intercomApiKey);
+    if (!session && !authedByKey) {
+      return NextResponse.json(
+        { error: "認証が必要です。ログインしてください。" },
+        { status: 401 }
+      );
+    }
+
     const body = await request.json();
     const { identity, room } = tokenRequestSchema.parse(body);
 

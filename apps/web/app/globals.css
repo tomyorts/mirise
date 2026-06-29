@@ -46,7 +46,9 @@ button:disabled {
 
 .brandBar {
   display: flex;
-  justify-content: flex-start;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
   padding: 6px 0 14px;
 }
 
@@ -55,10 +57,92 @@ button:disabled {
   width: auto;
 }
 
+.logoutButton {
+  background: #eef1f7;
+  color: #44506a;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
 @media (max-width: 720px) {
   .brandLogo {
     height: 44px;
   }
+}
+
+/* ログイン画面 */
+.loginShell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.loginCard {
+  width: min(420px, 100%);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(110, 125, 160, 0.18);
+  box-shadow: 0 20px 60px rgba(42, 56, 89, 0.1);
+  border-radius: 26px;
+  padding: 32px 26px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.loginLogo {
+  height: 54px;
+  width: auto;
+  margin-bottom: 18px;
+}
+
+.loginTitle {
+  font-size: 24px;
+  font-weight: 800;
+  color: #1f2f58;
+  margin-bottom: 8px;
+}
+
+.loginLead {
+  color: #667085;
+  margin-bottom: 22px;
+}
+
+.loginInput {
+  width: 100%;
+  border: 1px solid #d6ddea;
+  background: #ffffff;
+  border-radius: 14px;
+  padding: 14px 16px;
+  font-size: 16px;
+  outline: none;
+  margin-bottom: 14px;
+}
+
+.loginInput:focus {
+  border-color: #6f8cff;
+  box-shadow: 0 0 0 4px rgba(111, 140, 255, 0.14);
+}
+
+.loginButton {
+  width: 100%;
+  background: #1f2f58;
+  color: #ffffff;
+  font-size: 17px;
+  font-weight: 700;
+  padding: 14px;
+  border-radius: 14px;
+}
+
+.loginError {
+  margin: 14px 0 0;
+  color: #a20d1a;
+  font-weight: 600;
 }
 
 .liveBanner {
