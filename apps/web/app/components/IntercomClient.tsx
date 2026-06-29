@@ -9,8 +9,9 @@ import {
   Track,
   createLocalAudioTrack,
 } from "livekit-client";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getRoomLabel, INTERCOM_ROOMS } from "../lib/rooms";
+import { INTERCOM_ROOMS, type IntercomRoom } from "../lib/rooms";
 
 type TokenResponse = {
   token: string;
@@ -92,9 +93,35 @@ export function IntercomClient() {
   const [lastSignal, setLastSignal] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [lastKeyCode, setLastKeyCode] = useState<string | null>(null);
+  const [rooms, setRooms] = useState<IntercomRoom[]>(INTERCOM_ROOMS);
+  const [staffNames, setStaffNames] = useState<string[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const isConnected = connectionState === ConnectionState.Connected;
-  const selectedRoomLabel = useMemo(() => getRoomLabel(roomId), [roomId]);
+  const selectedRoomLabel = useMemo(
+    () => rooms.find((room) => room.id === roomId)?.label ?? roomId,
+    [rooms, roomId]
+  );
+
+  // ログイン後、管理画面で編集されたルーム・スタッフを読み込む。
+  useEffect(() => {
+    (async () => {
+      try {
+        const response = await fetch("/api/config");
+        if (!response.ok) return;
+        const data = (await response.json()) as {
+          rooms?: IntercomRoom[];
+          staff?: string[];
+          role?: string;
+        };
+        if (Array.isArray(data.rooms) && data.rooms.length > 0) setRooms(data.rooms);
+        if (Array.isArray(data.staff)) setStaffNames(data.staff);
+        setIsAdmin(data.role === "admin");
+      } catch {
+        // 取得失敗時は初期ルームのまま
+      }
+    })();
+  }, []);
 
   const refreshParticipants = useCallback(() => {
     const room = roomRef.current;
@@ -388,9 +415,16 @@ export function IntercomClient() {
     <main className="shell">
       <header className="brandBar">
         <img src="/mirise-logo.png" alt="MIRISE WELLMEDICAL GROUP" className="brandLogo" />
-        <button className="logoutButton" onClick={() => void logout()}>
-          ログアウト
-        </button>
+        <div className="brandBarActions">
+          {isAdmin ? (
+            <Link className="logoutButton" href="/admin">
+              管理画面
+            </Link>
+          ) : null}
+          <button className="logoutButton" onClick={() => void logout()}>
+            ログアウト
+          </button>
+        </div>
       </header>
 
       {isMicOn ? (
@@ -420,7 +454,15 @@ export function IntercomClient() {
             onChange={(event) => setIdentity(event.target.value)}
             placeholder="例: Dr.Sato / DH Tanaka"
             disabled={isBusy || isConnected}
+            list={staffNames.length > 0 ? "staffNameList" : undefined}
           />
+          {staffNames.length > 0 ? (
+            <datalist id="staffNameList">
+              {staffNames.map((name) => (
+                <option key={name} value={name} />
+              ))}
+            </datalist>
+          ) : null}
         </label>
 
         <label className="field">
@@ -430,7 +472,7 @@ export function IntercomClient() {
             onChange={(event) => setRoomId(event.target.value)}
             disabled={isBusy || isConnected}
           >
-            {INTERCOM_ROOMS.map((room) => (
+            {rooms.map((room) => (
               <option key={room.id} value={room.id}>
                 {room.label}
               </option>
@@ -533,7 +575,7 @@ export function IntercomClient() {
 
       <section className="panel">
         <div className="roomButtons">
-          {INTERCOM_ROOMS.map((room) => (
+          {rooms.map((room) => (
             <button
               key={room.id}
               className={room.id === roomId ? "selected" : ""}
