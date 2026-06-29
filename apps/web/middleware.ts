@@ -28,5 +28,5 @@ function redirectTo(req: NextRequest, target: string) {
 }
 
 export const config = {
-  matcher: ["/", "/admin/:path*"],
+  matcher: ["/", "/admin", "/admin/:path*"],
 };
