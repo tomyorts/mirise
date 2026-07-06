@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Breadcrumbs from '@/components/Breadcrumbs';
 import Link from 'next/link';
 import { SITE } from '@/lib/site';
 
@@ -8,8 +9,13 @@ export const metadata: Metadata = { title: 'オンラインセカンドオピニ
 // 問い合わせ先/自由診療の内容・費用/リスク・副作用/読者が自ら閲覧するページ
 export default function SecondOpinionConsult() {
   return (
+    <>
+    <Breadcrumbs items={[{ label: 'オンラインセカンドオピニオン' }]} />
     <div className="container policy">
-      <h1>オンラインセカンドオピニオン(自由診療)</h1>
+      <header className="page-header">
+        <p className="eyebrow">CONSULT</p>
+        <h1>オンラインセカンドオピニオン(自由診療)</h1>
+      </header>
       <p className="draft-banner">
         提供体制準備中: 価格・所要時間・同意書・予約枠は docs/media 07章のとおり確定後に公開する。以下は仮の記載。
       </p>
@@ -55,5 +61,6 @@ export default function SecondOpinionConsult() {
         予約フォーム(準備中)/ 電話: {SITE.operator.tel}({SITE.operator.name})
       </p>
     </div>
+    </>
   );
 }

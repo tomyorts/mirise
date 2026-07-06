@@ -4,6 +4,8 @@ export type FaqItem = { question: string; answer: string };
 
 export type Reference = { name: string; url?: string; note?: string };
 
+export type TocItem = { id: string; label: string };
+
 export type ArticleMeta = {
   slug: string; // カテゴリ配下のパス
   category: 'guide' | 'jaw-surgery' | 'treatment' | 'faq';
@@ -16,6 +18,7 @@ export type ArticleMeta = {
   updateNote?: string;
   reviewStatus: ReviewStatus;
   hasPaidTreatmentBlock: boolean; // 自由診療定型ブロックの要否(docs/media/04 チェックB)
+  toc?: TocItem[]; // 目次(本文H2のidと一致させる)
   faq: FaqItem[];
   references: Reference[];
 };
@@ -35,6 +38,13 @@ export const ARTICLES: ArticleMeta[] = [
     updatedAt: '2026-08-01',
     reviewStatus: 'draft',
     hasPaidTreatmentBlock: false,
+    toc: [
+      { id: 'teigi', label: '顎変形症とは:骨格のずれによる噛み合わせと顔貌の問題' },
+      { id: 'joken', label: '健康保険が適用される3つの条件' },
+      { id: 'tekiyogai', label: '保険が適用されないケース' },
+      { id: 'hiyou', label: '自己負担の目安と高額療養費制度' },
+      { id: 'nagare', label: '相談から治療開始までの流れ' },
+    ],
     faq: [
       {
         question: '顎変形症なら必ず保険で矯正できますか?',
@@ -69,6 +79,13 @@ export const ARTICLES: ArticleMeta[] = [
     updatedAt: '2026-08-01',
     reviewStatus: 'draft',
     hasPaidTreatmentBlock: true,
+    toc: [
+      { id: 'teigi', label: 'サージェリーファーストとは:手術を先に行う外科矯正' },
+      { id: 'hikaku', label: '従来法との比較' },
+      { id: 'tekio', label: '適応と判断される主な条件' },
+      { id: 'genkai', label: '限界とリスク:向いていないケース' },
+      { id: 'hoken', label: '保険適用との関係' },
+    ],
     faq: [
       {
         question: 'サージェリーファーストは誰でも受けられますか?',
@@ -103,6 +120,14 @@ export const ARTICLES: ArticleMeta[] = [
     updatedAt: '2026-08-01',
     reviewStatus: 'draft',
     hasPaidTreatmentBlock: false,
+    toc: [
+      { id: 'kenri', label: 'セカンドオピニオンは患者の正当な権利' },
+      { id: 'bamen', label: 'セカンドオピニオンを検討すべき5つの場面' },
+      { id: 'kiridashi', label: '主治医への切り出し方' },
+      { id: 'shiryou', label: '持参する資料' },
+      { id: 'shitsumon', label: 'セカンドオピニオン先で聞くべき7つの質問' },
+      { id: 'hiyou', label: '費用と受け方' },
+    ],
     faq: [
       {
         question: 'セカンドオピニオンを主治医に言い出しにくいのですが。',
@@ -122,6 +147,74 @@ export const ARTICLES: ArticleMeta[] = [
     ],
     references: [
       { name: '厚生労働省 上手な医療のかかり方(セカンドオピニオン)', note: 'URL確定' },
+    ],
+  },
+  {
+    slug: 'mouthpiece-ukeguchi',
+    category: 'faq',
+    title: 'マウスピース矯正で受け口(骨格性)は治りますか?',
+    summary:
+      '受け口の原因が「歯の傾き」であればマウスピース型装置を含む矯正単独で改善できる場合がありますが、原因が「顎の骨格のずれ」である場合、マウスピース矯正を含むどの矯正装置でも骨格そのものは変えられません。骨格性の受け口の根本的な治療は外科手術の併用が標準であり、まず自分の受け口が歯性か骨格性かの診断を受けることが出発点です。',
+    authorId: 'director',
+    reviewerId: 'director',
+    publishedAt: '2026-08-01',
+    updatedAt: '2026-08-01',
+    reviewStatus: 'draft',
+    hasPaidTreatmentBlock: false,
+    faq: [],
+    references: [
+      { name: '日本矯正歯科学会 不正咬合の種類に関する情報', note: '監修時にURL確定' },
+    ],
+  },
+  {
+    slug: 'hibassi-genkai',
+    category: 'faq',
+    title: '「歯を抜かない矯正」は常に良い選択ですか?',
+    summary:
+      'いいえ。抜歯・非抜歯は優劣ではなく、歯を並べるスペースをどう確保するかという診断の結果です。スペースが足りないのに非抜歯で無理に並べると、口元の突出感や歯茎の退縮、後戻りの原因になることがあります。「抜かない」という方針だけを理由に医院を選ぶのではなく、自分の症例でスペースがどれだけ不足していて、それをどう解決するのかの説明を求めることが重要です。',
+    authorId: 'director',
+    reviewerId: 'director',
+    publishedAt: '2026-08-01',
+    updatedAt: '2026-08-01',
+    reviewStatus: 'draft',
+    hasPaidTreatmentBlock: false,
+    faq: [],
+    references: [
+      { name: '抜歯・非抜歯の診断基準に関する学会資料', note: '監修時に確定' },
+    ],
+  },
+  {
+    slug: 'otona-nenrei',
+    category: 'faq',
+    title: '大人の矯正に年齢の上限はありますか?',
+    summary:
+      '年齢そのものによる上限はありません。歯は何歳でも動きます。ただし年齢とともに、歯周病の管理・骨の状態・被せ物や欠損の有無など、治療計画に影響する条件が増えるため、中高年の矯正は「できるかどうか」ではなく「何を目標に、どこまでやるか」の設計が重要になります。歯周病がコントロールされていない状態での矯正はリスクが大きいため、歯周治療が先行します。',
+    authorId: 'director',
+    reviewerId: 'director',
+    publishedAt: '2026-08-01',
+    updatedAt: '2026-08-01',
+    reviewStatus: 'draft',
+    hasPaidTreatmentBlock: false,
+    faq: [],
+    references: [
+      { name: '成人矯正・歯周疾患管理に関する学会ガイドライン', note: '監修時に確定' },
+    ],
+  },
+  {
+    slug: 'kao-kawaru',
+    category: 'faq',
+    title: '矯正すると顔は変わりますか?',
+    summary:
+      '変わる場合と、ほとんど変わらない場合があります。口元の突出感は前歯の位置移動(特に抜歯を伴う治療)で変化しやすい一方、輪郭・エラ・鼻など骨格そのものは矯正では変わりません。骨格由来の顔貌の変化を目的とする場合は外科手術の領域です。「小顔になる」といった期待で矯正を始めると齟齬が生じるため、治療で変わる範囲・変わらない範囲を治療前に確認してください。',
+    authorId: 'director',
+    reviewerId: 'director',
+    publishedAt: '2026-08-01',
+    updatedAt: '2026-08-01',
+    reviewStatus: 'draft',
+    hasPaidTreatmentBlock: false,
+    faq: [],
+    references: [
+      { name: '矯正治療と軟組織側貌の変化に関する文献', note: '監修時に確定' },
     ],
   },
 ];

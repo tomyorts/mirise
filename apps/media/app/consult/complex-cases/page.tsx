@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Breadcrumbs from '@/components/Breadcrumbs';
 import { SITE } from '@/lib/site';
 
 export const metadata: Metadata = { title: '難症例のご相談' };
@@ -6,8 +7,13 @@ export const metadata: Metadata = { title: '難症例のご相談' };
 // 「適応を明記した相談導線」。当院が適応でないケースも明記する(docs/media/01・03)
 export default function ComplexCasesConsult() {
   return (
+    <>
+    <Breadcrumbs items={[{ label: '難症例のご相談' }]} />
     <div className="container policy">
-      <h1>難症例のご相談</h1>
+      <header className="page-header">
+        <p className="eyebrow">CONSULT</p>
+        <h1>難症例のご相談</h1>
+      </header>
       <p>
         {SITE.operator.name}
         では、次のようなケースのご相談をお受けしています。一般的な矯正相談よりも、診断と治療計画の設計が結果を左右するケースです。
@@ -41,5 +47,6 @@ export default function ComplexCasesConsult() {
         予約フォーム(準備中)/ 電話: {SITE.operator.tel}
       </p>
     </div>
+    </>
   );
 }

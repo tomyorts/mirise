@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Breadcrumbs from '@/components/Breadcrumbs';
 import { SITE } from '@/lib/site';
 
 export const metadata: Metadata = { title: '編集ポリシー' };
@@ -6,8 +7,13 @@ export const metadata: Metadata = { title: '編集ポリシー' };
 // 文面の原本: docs/media/03_editorial_policy.md(改定時は原本と同期する)
 export default function EditorialPolicy() {
   return (
+    <>
+    <Breadcrumbs items={[{ label: '編集ポリシー' }]} />
     <div className="container policy">
-      <h1>編集ポリシー</h1>
+      <header className="page-header">
+        <p className="eyebrow">POLICY</p>
+        <h1>編集ポリシー</h1>
+      </header>
 
       <h2>このメディアの目的</h2>
       <p>
@@ -66,5 +72,6 @@ export default function EditorialPolicy() {
         内容の誤りに気づかれた場合は、お問い合わせフォーム(準備中)からご連絡ください。事実確認のうえ、訂正が必要な場合は記事を修正し、更新内容を記録します。重大な訂正は記事内に訂正履歴として残します。
       </p>
     </div>
+    </>
   );
 }

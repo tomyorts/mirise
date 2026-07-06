@@ -1,39 +1,42 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
+import type { Metadata } from 'next';
+import Breadcrumbs from '@/components/Breadcrumbs';
+import { ARTICLES, articlePath } from '@/lib/articles';
 
-export const metadata: Metadata = { title: 'よくある誤解と不安' };
+export const metadata: Metadata = {
+  title: 'よくある誤解と不安',
+  description:
+    'カウンセリングで実際にいただく質問に、1つずつ矯正歯科医師が答えます。マウスピース矯正、非抜歯、年齢、顔の変化。',
+};
 
-// 1問1ページ構成の入口。質問はカウンセリング・LINEの実際の質問から採用する(docs/media/06 FAQマイニング)
 export default function FaqIndex() {
+  const items = ARTICLES.filter((a) => a.category === 'faq');
   return (
-    <div className="container">
-      <h1>よくある誤解と不安</h1>
-      <p>
-        カウンセリングで実際にいただく質問に、1つずつ専門医が答えていくコーナーです。準備中の質問は順次公開します。
-      </p>
-      <ul className="card-list">
-        <li>
-          マウスピース矯正で受け口(骨格性)は治るのか
-          <p>準備中(docs/media/05 記事18)</p>
-        </li>
-        <li>
-          非抜歯矯正の限界:「抜かない」ことは常に良いことか
-          <p>準備中(記事19)</p>
-        </li>
-        <li>
-          大人の矯正に年齢の上限はあるか
-          <p>準備中(記事20)</p>
-        </li>
-        <li>
-          矯正すると顔は変わるのか
-          <p>準備中(記事21)</p>
-        </li>
-      </ul>
-      <p style={{ fontSize: '0.9rem' }}>
-        いま気になっていることがある方は、各記事末尾のFAQ、または
-        <Link href="/guide/second-opinion/">セカンドオピニオンの受け方</Link>
-        をご覧ください。
-      </p>
-    </div>
+    <>
+      <Breadcrumbs items={[{ label: 'よくある誤解と不安' }]} />
+      <div className="container">
+        <header className="page-header">
+          <p className="eyebrow">FAQ</p>
+          <h1>よくある誤解と不安</h1>
+          <p className="page-lead">
+            カウンセリングで実際にいただく質問に、1つずつ専門医が答えていくコーナーです。質問は今後も追加していきます。
+          </p>
+        </header>
+        <ul className="article-list">
+          {items.map((a) => (
+            <li key={a.slug}>
+              <Link href={articlePath(a)}>
+                <span className="list-title">{a.title}</span>
+                <p className="list-desc">{a.summary.slice(0, 100)}…</p>
+              </Link>
+            </li>
+          ))}
+        </ul>
+        <p className="note">
+          ここにない疑問をお持ちの方へ:
+          記事末尾の相談窓口からいただいた質問は、個人が特定されない形でこのコーナーの新しい記事の題材にさせていただくことがあります。
+        </p>
+      </div>
+    </>
   );
 }
