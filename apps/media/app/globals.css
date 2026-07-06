@@ -1,0 +1,128 @@
+/* 医学誌×ガイドブックの中間。白基調・余白多め・バナーゼロ(docs/media/01 デザイン方向性) */
+:root {
+  --ink: #1a2330;
+  --ink-soft: #4a5568;
+  --paper: #ffffff;
+  --paper-soft: #f6f8fa;
+  --line: #e2e8f0;
+  --accent: #1f6f78; /* 落ち着いた青緑。点滅・派手色は使わない */
+  --accent-soft: #e8f2f3;
+  --warn-bg: #fff8e6;
+  --warn-line: #e6c96a;
+  --max-width: 720px;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Yu Gothic', sans-serif;
+  line-height: 1.9;
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-underline-offset: 3px; }
+a:hover { opacity: 0.85; }
+
+img { max-width: 100%; height: auto; }
+
+.container { max-width: var(--max-width); margin: 0 auto; padding: 0 20px; }
+
+/* ヘッダー・フッター */
+.site-header {
+  border-bottom: 1px solid var(--line);
+  padding: 14px 0;
+}
+.site-header .inner {
+  max-width: 960px; margin: 0 auto; padding: 0 20px;
+  display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+}
+.brand { font-size: 1.15rem; font-weight: 700; color: var(--ink); text-decoration: none; }
+.brand small { display: block; font-size: 0.72rem; font-weight: 400; color: var(--ink-soft); }
+.global-nav { display: flex; gap: 16px; font-size: 0.85rem; flex-wrap: wrap; }
+.global-nav a { color: var(--ink-soft); text-decoration: none; }
+
+.site-footer {
+  border-top: 1px solid var(--line);
+  margin-top: 64px; padding: 32px 0 48px;
+  font-size: 0.82rem; color: var(--ink-soft); background: var(--paper-soft);
+}
+.site-footer .inner { max-width: 960px; margin: 0 auto; padding: 0 20px; }
+.site-footer nav { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.site-footer nav a { color: var(--ink-soft); }
+
+/* 見出し */
+h1 { font-size: 1.65rem; line-height: 1.5; margin: 0.6em 0; }
+h2 {
+  font-size: 1.25rem; line-height: 1.6; margin: 2.2em 0 0.8em;
+  padding-bottom: 0.3em; border-bottom: 2px solid var(--accent-soft);
+}
+h3 { font-size: 1.05rem; margin: 1.8em 0 0.6em; }
+
+/* 記事 */
+.article-meta {
+  display: flex; flex-wrap: wrap; gap: 8px 20px;
+  font-size: 0.82rem; color: var(--ink-soft);
+  padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  margin: 16px 0 24px;
+}
+.article-lead {
+  background: var(--paper-soft); border-left: 4px solid var(--accent);
+  padding: 16px 20px; margin: 24px 0; font-size: 0.95rem;
+}
+.article-body table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.9rem; display: block; overflow-x: auto; }
+.article-body th, .article-body td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+.article-body th { background: var(--paper-soft); white-space: nowrap; }
+
+/* ドラフトバナー(reviewStatus !== 'published') */
+.draft-banner {
+  background: var(--warn-bg); border: 1px solid var(--warn-line);
+  padding: 10px 16px; font-size: 0.85rem; margin: 16px 0;
+}
+
+/* 自由診療 定型ブロック(限定解除対応: docs/media/04) */
+.disclosure-block {
+  border: 2px solid var(--accent); border-radius: 4px;
+  padding: 20px; margin: 32px 0; font-size: 0.92rem;
+}
+.disclosure-block h2 { margin-top: 0; border: none; font-size: 1.05rem; }
+.disclosure-block dl { margin: 0; }
+.disclosure-block dt { font-weight: 700; margin-top: 10px; }
+.disclosure-block dd { margin: 2px 0 0 0; }
+
+/* FAQ */
+.faq-item { border-bottom: 1px solid var(--line); padding: 14px 0; }
+.faq-item h3 { margin: 0 0 6px; font-size: 1rem; }
+.faq-item p { margin: 0; font-size: 0.95rem; }
+
+/* 参考文献 */
+.references { font-size: 0.85rem; color: var(--ink-soft); }
+.references ol { padding-left: 1.4em; }
+
+/* CTA(固定2種のみ・点滅/追従禁止: docs/media/01) */
+.cta-block {
+  background: var(--accent-soft); border-radius: 6px;
+  padding: 24px; margin: 48px 0 0; text-align: center;
+}
+.cta-block p { margin: 0 0 14px; font-size: 0.92rem; }
+.cta-buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.cta-button {
+  display: inline-block; padding: 10px 22px; border-radius: 4px;
+  background: var(--accent); color: #fff; text-decoration: none; font-size: 0.92rem;
+}
+.cta-button.secondary { background: #fff; color: var(--accent); border: 1px solid var(--accent); }
+
+/* カード一覧 */
+.card-list { list-style: none; padding: 0; margin: 24px 0; display: grid; gap: 14px; }
+.card-list li { border: 1px solid var(--line); border-radius: 6px; padding: 16px 20px; }
+.card-list a { text-decoration: none; color: var(--ink); font-weight: 600; }
+.card-list p { margin: 6px 0 0; font-size: 0.85rem; color: var(--ink-soft); }
+.card-list .cat { font-size: 0.72rem; color: var(--accent); font-weight: 700; }
+
+/* ポリシー系ページ */
+.policy p, .policy li { font-size: 0.95rem; }
