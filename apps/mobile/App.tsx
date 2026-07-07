@@ -22,6 +22,10 @@ registerGlobals();
 // Web版と同じトークン発行APIを再利用する(Vercelに公開済み)。
 const TOKEN_ENDPOINT = "https://mirisevoicelink.vercel.app/api/token";
 
+// ネイティブアプリ用のAPIキー(合言葉)。ビルド時に EXPO_PUBLIC_INTERCOM_KEY から埋め込む。
+// Vercel 側の INTERCOM_API_KEY と同じ値にすること。
+const INTERCOM_KEY = process.env.EXPO_PUBLIC_INTERCOM_KEY;
+
 const ROOMS = [
   { id: "front", label: "受付" },
   { id: "clinic", label: "診療室" },
@@ -77,9 +81,11 @@ export default function App() {
       await cleanup();
       await AudioSession.startAudioSession();
 
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (INTERCOM_KEY) headers["x-intercom-key"] = INTERCOM_KEY;
       const response = await fetch(TOKEN_ENDPOINT, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ identity: identity.trim() || "staff", room: roomId }),
       });
       const data = (await response.json()) as {
