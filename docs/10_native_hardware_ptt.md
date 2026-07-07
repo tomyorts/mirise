@@ -2,7 +2,14 @@
 
 このドキュメントは、ネイティブアプリ（`apps/mobile`, Expo/React Native）で
 **Bluetoothイヤホンのボタンを「押して話す（PTT）」に割り当てる**ための実装設計です。
-Apple Developer 有効化 → Phase 2（音声）の開発ビルドが実機で動いたら、この手順で組み込みます。
+
+> ✅ **実装済み（2026-07）**: 本設計はコードに反映済みです。
+> - ネイティブモジュール: `apps/mobile/modules/remote-ptt/`（Swift + TS）
+> - フック: `apps/mobile/hooks/useRemotePtt.ts`
+> - 画面組み込み: `apps/mobile/App.tsx`（接続中のみ購読 + 30秒自動OFF）
+>
+> あとは開発ビルド（`npx eas-cli build --profile development --platform ios`）を作って実機で
+> §5 の手順どおり動作確認するだけです。以下は仕組みと確認手順のリファレンスです。
 
 ---
 

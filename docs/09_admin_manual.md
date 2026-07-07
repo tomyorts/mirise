@@ -133,7 +133,7 @@ Upstash Redis の環境変数が未設定です。→ §4 参照
 
 - ✅ Web版: ログイン・管理画面・PTT改良まで完了
 - 🔄 **ネイティブアプリ（iOS）**: Expoで開発中
-  - Phase 1（iPhoneで起動）完了 / Phase 2（音声）コード準備済み
-  - Apple Developer Programの有効化待ち → 有効化後 `npx eas-cli build --profile development --platform ios`
-  - ネイティブ版はバックグラウンド動作・ハードボタンPTT対応が目標
+  - Phase 1（iPhoneで起動）完了 / Phase 2（音声）実装済み / Phase 3（イヤホンのボタンPTT）実装済み
+  - Apple Developer Program 有効化済み → `npx eas-cli build --profile development --platform ios` で開発ビルドを作成し実機確認
+  - ネイティブ版はバックグラウンド動作・ハードボタンPTT対応（詳細 `docs/10_native_hardware_ptt.md`）
 - ⬜ 個別ログインへの移行、施設別ルーム、全院展開（docs/05参照）

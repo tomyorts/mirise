@@ -11,6 +11,10 @@ import {
 } from "react-native";
 import { AudioSession, registerGlobals } from "@livekit/react-native";
 import { Room, RoomEvent } from "livekit-client";
+import { useRemotePtt } from "./hooks/useRemotePtt";
+
+// 止め忘れ防止: トグルでONにしたら一定時間で自動OFF(ミリ秒)。
+const AUTO_OFF_MS = 30_000;
 
 // LiveKit(WebRTC)を使う前に一度だけグローバル初期化が必要。
 registerGlobals();
@@ -34,8 +38,23 @@ export default function App() {
   const [connecting, setConnecting] = useState(false);
   const [micOn, setMicOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // トグル判定を最新値で行うための参照 + 自動OFFタイマー。
+  const micOnRef = useRef(false);
+  const autoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    micOnRef.current = micOn;
+  }, [micOn]);
+
+  const clearAutoOff = useCallback(() => {
+    if (autoOffRef.current) {
+      clearTimeout(autoOffRef.current);
+      autoOffRef.current = null;
+    }
+  }, []);
 
   const cleanup = useCallback(async () => {
+    clearAutoOff();
     try {
       await roomRef.current?.disconnect();
     } catch {
@@ -49,7 +68,7 @@ export default function App() {
     }
     setConnected(false);
     setMicOn(false);
-  }, []);
+  }, [clearAutoOff]);
 
   const connect = useCallback(async () => {
     setError(null);
@@ -92,16 +111,35 @@ export default function App() {
     }
   }, [cleanup, identity, roomId]);
 
-  const setMic = useCallback(async (on: boolean) => {
-    const room = roomRef.current;
-    if (!room) return;
-    try {
-      await room.localParticipant.setMicrophoneEnabled(on);
-      setMicOn(on);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "マイク操作に失敗しました");
+  const setMic = useCallback(
+    async (on: boolean) => {
+      const room = roomRef.current;
+      if (!room) return;
+      try {
+        await room.localParticipant.setMicrophoneEnabled(on);
+        setMicOn(on);
+        if (!on) clearAutoOff();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "マイク操作に失敗しました");
+      }
+    },
+    [clearAutoOff],
+  );
+
+  // タップ/ハードボタン用トグル: ONにしたら AUTO_OFF_MS で自動OFF。
+  const toggleMic = useCallback(() => {
+    const next = !micOnRef.current;
+    void setMic(next);
+    clearAutoOff();
+    if (next) {
+      autoOffRef.current = setTimeout(() => {
+        void setMic(false);
+      }, AUTO_OFF_MS);
     }
-  }, []);
+  }, [setMic, clearAutoOff]);
+
+  // 接続中だけイヤホンのハードボタンを購読する。
+  useRemotePtt(toggleMic, connected);
 
   useEffect(() => {
     return () => {
@@ -180,7 +218,7 @@ export default function App() {
 
             <Pressable
               style={[styles.toggle, micOn && styles.toggleOn]}
-              onPress={() => void setMic(!micOn)}
+              onPress={toggleMic}
             >
               <Text style={[styles.toggleText, micOn && styles.toggleTextOn]}>
                 {micOn ? "■ 送信中 — タップで停止" : "● タップで送信開始 / 停止"}
@@ -189,6 +227,8 @@ export default function App() {
 
             <Text style={styles.hint}>
               「押して話す」を押している間だけ声が流れます。常時ONにはなりません。
+              🎧 イヤホンの再生/停止ボタンでも送信ON/OFF（トグル）できます。
+              切り忘れ防止のため、送信は約30秒で自動停止します。
               診療中は患者情報を言わず、チェア番号やセット名で運用してください。
             </Text>
           </View>
