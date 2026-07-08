@@ -15,11 +15,13 @@ npm run build # 静的エクスポート(out/)
 ## 実装済み
 
 - トップ(意思決定の入口)、カテゴリ一覧(guide / jaw-surgery / faq)
-- 柱記事3本の**監修前ドラフト**(顎変形症の保険適用/サージェリーファースト/セカンドオピニオンの受け方)
+- 記事25本の**監修前ドラフト**(難症例・外科矯正12/意思決定ガイド7/治療法3/FAQ3。90日計画の記事をすべて網羅)
+- 3分セルフチェック(/check/): 状況に応じて推奨記事と相談導線を出し分けるCVツール
 - 透明性ページ(運営者情報・編集ポリシー ※原本は docs/media/03)
 - 相談導線2種(オンラインSO・難症例相談。限定解除4要件を意識した構成)
 - 記事テンプレート: 執筆/監修表示、公開日・更新日、リード要約、FAQ、参考文献、固定CTA
-- JSON-LD: MedicalWebPage / FAQPage / Physician / MedicalClinic / Organization
+- JSON-LD: MedicalWebPage / FAQPage / Physician / MedicalClinic / Organization / MedicalCondition / speakable
+- 関連記事による回遊、OGP/canonical(lib/metadata.ts)、llms.txt
 - 自由診療の定型ブロック(DisclosureBlock)
 
 ## 公開前に必須の作業(このままでは公開しない)
