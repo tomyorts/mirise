@@ -1,14 +1,11 @@
-import type { Metadata } from 'next';
 import ArticleLayout from '@/components/ArticleLayout';
 import DisclosureBlock from '@/components/DisclosureBlock';
 import { getArticle } from '@/lib/articles';
+import { articleMetadata } from '@/lib/metadata';
 
 const meta = getArticle('jaw-surgery', 'surgery-first')!;
 
-export const metadata: Metadata = {
-  title: meta.title,
-  description: meta.summary,
-};
+export const metadata = articleMetadata(meta);
 
 // ドラフト。適応条件・数値・費用は監修時に確定する。
 export default function Page() {

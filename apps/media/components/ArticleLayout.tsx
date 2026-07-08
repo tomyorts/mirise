@@ -6,6 +6,7 @@ import { REVIEW_STATUS_LABEL, SITE } from '@/lib/site';
 import Breadcrumbs from './Breadcrumbs';
 import Cta from './Cta';
 import JsonLd from './JsonLd';
+import RelatedArticles from './RelatedArticles';
 
 // 記事共通テンプレート(docs/media/02 2.1)
 // パンくず→ヘッダー(執筆・監修・日付)→リード→目次→本文→FAQ→参考文献→執筆者→固定CTA
@@ -27,6 +28,11 @@ export default function ArticleLayout({
     description: meta.summary,
     url: `${SITE.url}${articlePath(meta)}`,
     inLanguage: 'ja',
+    // AI検索・音声アシスタントへの引用ターゲット指定(要点リード)
+    speakable: { '@type': 'SpeakableSpecification', cssSelector: ['.article-lead'] },
+    ...(meta.condition
+      ? { about: { '@type': 'MedicalCondition', name: meta.condition } }
+      : {}),
     author: { '@type': 'Person', name: author.name, jobTitle: author.title },
     reviewedBy: {
       '@type': 'Physician',
@@ -139,6 +145,8 @@ export default function ArticleLayout({
             </ol>
           </section>
         )}
+
+        <RelatedArticles meta={meta} />
 
         <aside className="author-box">
           <span className="avatar" aria-hidden="true">

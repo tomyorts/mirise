@@ -384,6 +384,67 @@ strong { font-weight: 600; background: linear-gradient(transparent 68%, var(--ac
 }
 .info-table td { padding: 12px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
 
+/* ---------- セルフチェック(CV導線) ---------- */
+.self-check { margin: 32px 0; }
+.sc-progress {
+  font-size: 0.76rem; letter-spacing: 0.14em; color: var(--accent);
+  font-weight: 600; margin: 0 0 12px;
+}
+.sc-q { border: none; padding: 0; margin: 0; }
+.sc-q legend {
+  font-family: var(--font-serif); font-size: 1.15rem; font-weight: 600;
+  padding: 0; margin-bottom: 18px; line-height: 1.7;
+}
+.sc-option {
+  display: block; width: 100%; text-align: left;
+  font: inherit; font-size: 0.95rem; color: var(--ink);
+  background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 16px 20px; margin: 0 0 10px; cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.sc-option:hover { border-color: var(--accent); background: var(--accent-soft); }
+.sc-result h2 {
+  font-family: var(--font-serif); border: none; padding: 0; margin: 0 0 4px;
+}
+.sc-note { font-size: 0.8rem; color: var(--ink-faint); margin: 0 0 8px; }
+.sc-cta {
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  border-radius: var(--radius); padding: 22px 24px; margin: 24px 0;
+  font-size: 0.93rem;
+}
+.sc-cta p { margin: 0 0 14px; }
+.sc-restart {
+  font: inherit; font-size: 0.85rem; color: var(--ink-soft);
+  background: none; border: none; text-decoration: underline;
+  text-underline-offset: 4px; cursor: pointer; padding: 0;
+}
+.sc-restart:hover { color: var(--accent); }
+
+/* トップのセルフチェックバナー */
+.check-banner {
+  max-width: var(--wide); margin: 0 auto; padding: 0 22px;
+}
+.check-banner .inner {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 20px; flex-wrap: wrap;
+  background: linear-gradient(180deg, var(--accent-soft), transparent);
+  border: 1px solid var(--accent-line); border-radius: var(--radius);
+  padding: 24px 28px; margin-top: 32px;
+}
+.check-banner .title {
+  font-family: var(--font-serif); font-size: 1.1rem; font-weight: 600; margin: 0 0 4px;
+}
+.check-banner p { margin: 0; font-size: 0.86rem; color: var(--ink-soft); }
+
+/* 関連記事 */
+.related h2 {
+  font-family: var(--font-serif); font-size: 1.2rem; margin: 2.6em 0 0.4em;
+  border-left: 4px solid var(--accent); border-bottom: 1px solid var(--line);
+  padding: 0 0 0.35em 0.8em; font-weight: 600;
+}
+.related .article-list { margin-top: 8px; }
+.related .article-list a { padding: 14px 6px; }
+
 /* ---------- 404 ---------- */
 .not-found { text-align: center; padding: 100px 22px; }
 .not-found h1 { font-size: 1.4rem; }

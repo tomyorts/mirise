@@ -9,14 +9,6 @@ export const metadata: Metadata = {
     '矯正治療を始めるかどうか、誰に任せるかを決めるための常設ガイド。カウンセリングの聞き方、セカンドオピニオン、費用と転院の考え方。',
 };
 
-const UPCOMING = [
-  '矯正を始める前の10の質問(自己整理シート付き)',
-  'カウンセリングで聞くべき15の質問(チェックリスト)',
-  '矯正の費用の仕組み:総額制・処置料別・追加費用の読み方',
-  '矯正の転院とお金:中断時の精算・返金はどうなるか',
-  '「矯正医選び」で本当に見るべきもの',
-  '治療計画書の読み方',
-];
 
 export default function GuideIndex() {
   const items = ARTICLES.filter((a) => a.category === 'guide');
@@ -38,20 +30,6 @@ export default function GuideIndex() {
                 <span className="list-title">{a.title}</span>
                 <p className="list-desc">{a.summary.slice(0, 100)}…</p>
               </Link>
-            </li>
-          ))}
-        </ul>
-        <h2>今後公開予定</h2>
-        <ul className="article-list">
-          {UPCOMING.map((t) => (
-            <li key={t}>
-              <span
-                className="list-title list-coming"
-                style={{ display: 'block', padding: '14px 6px' }}
-              >
-                {t}
-                <span className="badge">準備中</span>
-              </span>
             </li>
           ))}
         </ul>

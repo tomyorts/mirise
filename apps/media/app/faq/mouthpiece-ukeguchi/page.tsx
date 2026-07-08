@@ -1,11 +1,11 @@
-import type { Metadata } from 'next';
 import Link from 'next/link';
 import ArticleLayout from '@/components/ArticleLayout';
 import { getArticle } from '@/lib/articles';
+import { articleMetadata } from '@/lib/metadata';
 
 const meta = getArticle('faq', 'mouthpiece-ukeguchi')!;
 
-export const metadata: Metadata = { title: meta.title, description: meta.summary };
+export const metadata = articleMetadata(meta);
 
 export default function Page() {
   return (

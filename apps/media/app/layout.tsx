@@ -81,6 +81,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <h3>コンテンツ</h3>
                 <ul>
                   <li>
+                    <Link href="/check/">3分セルフチェック</Link>
+                  </li>
+                  <li>
                     <Link href="/guide/">意思決定ガイド</Link>
                   </li>
                   <li>

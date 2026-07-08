@@ -1,28 +1,17 @@
+import Link from 'next/link';
 import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
+import { ARTICLES, articlePath } from '@/lib/articles';
 
 export const metadata: Metadata = {
   title: '治療法を正しく理解する',
   description:
-    'ワイヤー矯正・マウスピース矯正の適応の科学、デジタル矯正・3Dシミュレーションで分かること、抜歯・非抜歯の判断基準。',
+    'ワイヤー矯正・マウスピース矯正の適応の科学、デジタル矯正・3Dシミュレーションで分かること、抜歯・非抜歯の判断基準。装置の宣伝ではなく適応を理解するためのカテゴリ。',
+  alternates: { canonical: '/treatment/' },
 };
 
-const UPCOMING = [
-  {
-    title: 'ワイヤー矯正とマウスピース矯正:適応の科学',
-    desc: '「どちらが良いか」ではなく「自分の症例にどちらが適応か」。装置ごとの得意な歯の動きから解説します。',
-  },
-  {
-    title: '3Dシミュレーションで分かること・分からないこと',
-    desc: '実際のシミュレーション画面を使って、事前に可視化できる範囲と予測の限界を示します。',
-  },
-  {
-    title: '抜歯・非抜歯の判断基準:スペース分析の実際',
-    desc: '診断の現場でどのような数値に基づいて判断しているかを公開します。',
-  },
-];
-
 export default function TreatmentIndex() {
+  const items = ARTICLES.filter((a) => a.category === 'treatment');
   return (
     <>
       <Breadcrumbs items={[{ label: '治療法を正しく理解する' }]} />
@@ -35,19 +24,15 @@ export default function TreatmentIndex() {
           </p>
         </header>
         <ul className="article-list">
-          {UPCOMING.map((t) => (
-            <li key={t.title}>
-              <span className="list-title list-coming" style={{ display: 'block', padding: '14px 6px' }}>
-                {t.title}
-                <span className="badge">準備中</span>
-                <p className="list-desc">{t.desc}</p>
-              </span>
+          {items.map((a) => (
+            <li key={a.slug}>
+              <Link href={articlePath(a)}>
+                <span className="list-title">{a.title}</span>
+                <p className="list-desc">{a.summary.slice(0, 100)}…</p>
+              </Link>
             </li>
           ))}
         </ul>
-        <p className="note">
-          このカテゴリの記事は、90日コンテンツ計画(docs/media/05)に基づき順次公開されます。
-        </p>
       </div>
     </>
   );

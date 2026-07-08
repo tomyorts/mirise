@@ -1,13 +1,10 @@
-import type { Metadata } from 'next';
 import ArticleLayout from '@/components/ArticleLayout';
 import { getArticle } from '@/lib/articles';
+import { articleMetadata } from '@/lib/metadata';
 
 const meta = getArticle('jaw-surgery', 'hoken-tekiyo')!;
 
-export const metadata: Metadata = {
-  title: meta.title,
-  description: meta.summary,
-};
+export const metadata = articleMetadata(meta);
 
 // ドラフト。数値・条件はすべて監修時に確定する(<要確認>マーカー)。
 export default function Page() {

@@ -63,6 +63,18 @@ export default function Home() {
         </div>
       </section>
 
+      <aside className="check-banner">
+        <div className="inner">
+          <div>
+            <p className="title">どの記事から読めばいいか分からない方へ</p>
+            <p>3つの質問に答えると、あなたの状況に合った記事と相談の目安をご案内します(個人情報の入力は不要)。</p>
+          </div>
+          <Link className="cta-button" href="/check/">
+            3分セルフチェックを始める
+          </Link>
+        </div>
+      </aside>
+
       <section className="section">
         <h2>あなたの状況から探す</h2>
         <p className="section-lead">

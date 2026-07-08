@@ -21,6 +21,8 @@ export type ArticleMeta = {
   toc?: TocItem[]; // 目次(本文H2のidと一致させる)
   faq: FaqItem[];
   references: Reference[];
+  related?: string[]; // 関連記事パス(回遊設計。未指定時は同カテゴリから自動選出)
+  condition?: string; // 対象疾患名(JSON-LDのMedicalCondition用)
 };
 
 // 記事レジストリ。本文は app/<category>/<slug>/page.tsx に置く。

@@ -1,13 +1,10 @@
-import type { Metadata } from 'next';
 import ArticleLayout from '@/components/ArticleLayout';
 import { getArticle } from '@/lib/articles';
+import { articleMetadata } from '@/lib/metadata';
 
 const meta = getArticle('guide', 'second-opinion')!;
 
-export const metadata: Metadata = {
-  title: meta.title,
-  description: meta.summary,
-};
+export const metadata = articleMetadata(meta);
 
 export default function Page() {
   return (
