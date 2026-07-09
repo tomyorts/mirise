@@ -82,6 +82,14 @@ export function IntercomClient() {
   const audioContainerRef = useRef<HTMLDivElement | null>(null);
   const currentRoomIdRef = useRef("clinic");
   const pttActiveRef = useRef(false);
+  // 音量ブースト用(Web Audioで100%超の増幅を可能にする)。
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const gainRef = useRef<GainNode | null>(null);
+  const volumeRef = useRef(1.5);
+  // 受信中の各音声要素。音量変更時に再生経路を切り替える。
+  const remoteAudiosRef = useRef<
+    Map<object, { element: HTMLMediaElement; source: MediaStreamAudioSourceNode | null }>
+  >(new Map());
 
   const [identity, setIdentity] = useState(DEFAULT_IDENTITY);
   const [roomId, setRoomId] = useState("clinic");
@@ -96,8 +104,79 @@ export function IntercomClient() {
   const [rooms, setRooms] = useState<IntercomRoom[]>(INTERCOM_ROOMS);
   const [staffNames, setStaffNames] = useState<string[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);
+  // 受信音量(1.0=100%)。100%超で端末の最大音量よりさらに大きくできる。
+  const [volume, setVolume] = useState(1.5);
 
   const isConnected = connectionState === ConnectionState.Connected;
+
+  // Web Audioのグラフ(増幅用)を用意する。未対応環境では null。
+  const ensureAudioGraph = useCallback(() => {
+    if (typeof window === "undefined") return null;
+    if (!audioCtxRef.current) {
+      const Ctx =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctx) return null;
+      const ctx = new Ctx();
+      const gain = ctx.createGain();
+      gain.gain.value = volumeRef.current;
+      gain.connect(ctx.destination);
+      audioCtxRef.current = ctx;
+      gainRef.current = gain;
+    }
+    return audioCtxRef.current;
+  }, []);
+
+  // 音量を各音声要素に反映する。
+  // 100%以下: 素の<audio>要素で再生(実績のある経路・回帰リスクなし)。
+  // 100%超: Web AudioのGainNodeで増幅(端末の最大音量を超えられる)。
+  // Web Audio生成に失敗した要素は素の再生(最大100%)にフォールバックし、無音を防ぐ。
+  const applyVolume = useCallback(
+    (vol: number) => {
+      volumeRef.current = vol;
+      const boost = vol > 1.0;
+      const ctx = boost ? ensureAudioGraph() : audioCtxRef.current;
+      if (gainRef.current) gainRef.current.gain.value = vol;
+
+      remoteAudiosRef.current.forEach((rec) => {
+        if (boost && ctx && gainRef.current) {
+          if (!rec.source && rec.element.srcObject instanceof MediaStream) {
+            try {
+              rec.source = ctx.createMediaStreamSource(rec.element.srcObject);
+              rec.source.connect(gainRef.current);
+            } catch {
+              rec.source = null;
+            }
+          }
+          if (rec.source) {
+            rec.element.muted = true; // 音はWeb Audio側から
+            if (ctx.state === "suspended") void ctx.resume();
+          } else {
+            rec.element.muted = false; // 失敗時は素の100%再生
+            rec.element.volume = 1;
+          }
+        } else {
+          // 100%以下: Web Audio経路を切り、素の要素で再生。
+          if (rec.source) {
+            try {
+              rec.source.disconnect();
+            } catch {
+              // noop
+            }
+            rec.source = null;
+          }
+          rec.element.muted = false;
+          rec.element.volume = Math.min(1, vol);
+        }
+      });
+    },
+    [ensureAudioGraph]
+  );
+
+  // スライダーの値を反映。
+  useEffect(() => {
+    applyVolume(volume);
+  }, [volume, applyVolume]);
   const selectedRoomLabel = useMemo(
     () => rooms.find((room) => room.id === roomId)?.label ?? roomId,
     [rooms, roomId]
@@ -164,6 +243,23 @@ export function IntercomClient() {
     if (audioContainerRef.current) {
       audioContainerRef.current.innerHTML = "";
     }
+
+    // 音量ブースト用のWeb Audioを片付ける(次回接続で作り直す)。
+    remoteAudiosRef.current.forEach((rec) => {
+      if (rec.source) {
+        try {
+          rec.source.disconnect();
+        } catch {
+          // noop
+        }
+      }
+    });
+    remoteAudiosRef.current.clear();
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+      gainRef.current = null;
+    }
   }, []);
 
   const logout = useCallback(async () => {
@@ -183,6 +279,10 @@ export function IntercomClient() {
 
       try {
         disconnect();
+
+        // ユーザー操作(接続ボタン)の中でAudioContextを起動しておく(自動再生制限対策)。
+        const ctx = ensureAudioGraph();
+        if (ctx && ctx.state === "suspended") void ctx.resume();
 
         const trimmedIdentity = identity.trim() || DEFAULT_IDENTITY;
         const tokenResponse = await requestToken(trimmedIdentity, targetRoomId);
@@ -206,8 +306,20 @@ export function IntercomClient() {
             element.autoplay = true;
             element.dataset.livekitTrack = "remote-audio";
             audioContainerRef.current?.appendChild(element);
+            // 要素を登録し、現在の音量設定を適用(必要なら増幅経路に切替)。
+            remoteAudiosRef.current.set(track, { element, source: null });
+            applyVolume(volumeRef.current);
           })
           .on(RoomEvent.TrackUnsubscribed, (track) => {
+            const rec = remoteAudiosRef.current.get(track);
+            if (rec?.source) {
+              try {
+                rec.source.disconnect();
+              } catch {
+                // noop
+              }
+            }
+            remoteAudiosRef.current.delete(track);
             track.detach().forEach((element) => element.remove());
           })
           .on(
@@ -257,7 +369,7 @@ export function IntercomClient() {
         setIsBusy(false);
       }
     },
-    [disconnect, identity, refreshParticipants, roomId, talkMode]
+    [applyVolume, disconnect, ensureAudioGraph, identity, refreshParticipants, roomId, talkMode]
   );
 
   const sendSignal = useCallback((message: SignalMessage) => {
@@ -517,6 +629,24 @@ export function IntercomClient() {
           >
             常時ON
           </button>
+        </div>
+
+        <div className="volumeRow">
+          <label htmlFor="volume">
+            🔊 受信音量 <strong>{Math.round(volume * 100)}%</strong>
+          </label>
+          <input
+            id="volume"
+            type="range"
+            min={0.5}
+            max={3}
+            step={0.1}
+            value={volume}
+            onChange={(event) => setVolume(parseFloat(event.target.value))}
+          />
+          <span className="volumeHint">
+            100%超で端末の最大音量よりさらに大きくできます（イヤホン推奨・大きすぎ注意）
+          </span>
         </div>
 
         <button
