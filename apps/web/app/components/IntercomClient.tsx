@@ -86,6 +86,10 @@ export function IntercomClient() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainRef = useRef<GainNode | null>(null);
   const volumeRef = useRef(1.5);
+  // 受信中の各音声要素。音量変更時に再生経路を切り替える。
+  const remoteAudiosRef = useRef<
+    Map<object, { element: HTMLMediaElement; source: MediaStreamAudioSourceNode | null }>
+  >(new Map());
 
   const [identity, setIdentity] = useState(DEFAULT_IDENTITY);
   const [roomId, setRoomId] = useState("clinic");
@@ -105,12 +109,6 @@ export function IntercomClient() {
 
   const isConnected = connectionState === ConnectionState.Connected;
 
-  // 音量スライダーの値をGainNodeに反映。
-  useEffect(() => {
-    volumeRef.current = volume;
-    if (gainRef.current) gainRef.current.gain.value = volume;
-  }, [volume]);
-
   // Web Audioのグラフ(増幅用)を用意する。未対応環境では null。
   const ensureAudioGraph = useCallback(() => {
     if (typeof window === "undefined") return null;
@@ -128,6 +126,57 @@ export function IntercomClient() {
     }
     return audioCtxRef.current;
   }, []);
+
+  // 音量を各音声要素に反映する。
+  // 100%以下: 素の<audio>要素で再生(実績のある経路・回帰リスクなし)。
+  // 100%超: Web AudioのGainNodeで増幅(端末の最大音量を超えられる)。
+  // Web Audio生成に失敗した要素は素の再生(最大100%)にフォールバックし、無音を防ぐ。
+  const applyVolume = useCallback(
+    (vol: number) => {
+      volumeRef.current = vol;
+      const boost = vol > 1.0;
+      const ctx = boost ? ensureAudioGraph() : audioCtxRef.current;
+      if (gainRef.current) gainRef.current.gain.value = vol;
+
+      remoteAudiosRef.current.forEach((rec) => {
+        if (boost && ctx && gainRef.current) {
+          if (!rec.source && rec.element.srcObject instanceof MediaStream) {
+            try {
+              rec.source = ctx.createMediaStreamSource(rec.element.srcObject);
+              rec.source.connect(gainRef.current);
+            } catch {
+              rec.source = null;
+            }
+          }
+          if (rec.source) {
+            rec.element.muted = true; // 音はWeb Audio側から
+            if (ctx.state === "suspended") void ctx.resume();
+          } else {
+            rec.element.muted = false; // 失敗時は素の100%再生
+            rec.element.volume = 1;
+          }
+        } else {
+          // 100%以下: Web Audio経路を切り、素の要素で再生。
+          if (rec.source) {
+            try {
+              rec.source.disconnect();
+            } catch {
+              // noop
+            }
+            rec.source = null;
+          }
+          rec.element.muted = false;
+          rec.element.volume = Math.min(1, vol);
+        }
+      });
+    },
+    [ensureAudioGraph]
+  );
+
+  // スライダーの値を反映。
+  useEffect(() => {
+    applyVolume(volume);
+  }, [volume, applyVolume]);
   const selectedRoomLabel = useMemo(
     () => rooms.find((room) => room.id === roomId)?.label ?? roomId,
     [rooms, roomId]
@@ -196,6 +245,16 @@ export function IntercomClient() {
     }
 
     // 音量ブースト用のWeb Audioを片付ける(次回接続で作り直す)。
+    remoteAudiosRef.current.forEach((rec) => {
+      if (rec.source) {
+        try {
+          rec.source.disconnect();
+        } catch {
+          // noop
+        }
+      }
+    });
+    remoteAudiosRef.current.clear();
     if (audioCtxRef.current) {
       audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
@@ -247,24 +306,20 @@ export function IntercomClient() {
             element.autoplay = true;
             element.dataset.livekitTrack = "remote-audio";
             audioContainerRef.current?.appendChild(element);
-
-            // Web Audioで増幅(100%超も可)。失敗時は要素の100%再生にフォールバック。
-            try {
-              const ctx = ensureAudioGraph();
-              const gain = gainRef.current;
-              if (ctx && gain && track.mediaStreamTrack) {
-                const source = ctx.createMediaStreamSource(
-                  new MediaStream([track.mediaStreamTrack])
-                );
-                source.connect(gain);
-                element.muted = true; // 音はWeb Audio側から出す(二重再生防止)
-                if (ctx.state === "suspended") void ctx.resume();
-              }
-            } catch {
-              element.muted = false; // フォールバック: 要素の100%再生
-            }
+            // 要素を登録し、現在の音量設定を適用(必要なら増幅経路に切替)。
+            remoteAudiosRef.current.set(track, { element, source: null });
+            applyVolume(volumeRef.current);
           })
           .on(RoomEvent.TrackUnsubscribed, (track) => {
+            const rec = remoteAudiosRef.current.get(track);
+            if (rec?.source) {
+              try {
+                rec.source.disconnect();
+              } catch {
+                // noop
+              }
+            }
+            remoteAudiosRef.current.delete(track);
             track.detach().forEach((element) => element.remove());
           })
           .on(
@@ -314,7 +369,7 @@ export function IntercomClient() {
         setIsBusy(false);
       }
     },
-    [disconnect, ensureAudioGraph, identity, refreshParticipants, roomId, talkMode]
+    [applyVolume, disconnect, ensureAudioGraph, identity, refreshParticipants, roomId, talkMode]
   );
 
   const sendSignal = useCallback((message: SignalMessage) => {
