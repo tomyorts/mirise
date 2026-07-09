@@ -9,6 +9,10 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "jp.co.medident.miriseintercom",
+      "entitlements": {
+        "com.apple.developer.push-to-talk": true,
+        "aps-environment": "development"
+      },
       "infoPlist": {
         "NSMicrophoneUsageDescription": "院内インカムで通話するためにマイクを使用します。",
         "UIBackgroundModes": ["audio"]
