@@ -30,10 +30,14 @@ npm run build # 静的エクスポート(out/)
 ## 公開前に必須の作業(このままでは公開しない)
 
 1. **全記事の歯科医師監修**(本文中の「要確認」マーカーの確定)と docs/media/04 のコンプラチェック
-2. `lib/site.ts` / `lib/authors.ts` の実名・住所・電話・ドメインの確定
+2. ~~`lib/site.ts` / `lib/authors.ts` の実名・住所・電話・ドメインの確定~~ ✅ 確定済
+   (ドメイン: mirise-ortho.com のサブディレクトリ `/media/`。監修者: 富田大介 院長。
+   住所・電話・略歴は staff ページより反映。※公開時に本人最終確認)
 3. `app/layout.tsx` の `robots: noindex` の解除(監修・コンプラ完了後のみ)
 4. 相談フォーム実装+GA4計測(docs/media/08 の仕様)
-5. Vercelプロジェクトの新規作成(独自ドメイン。mirisevoicelinkとは別プロジェクト)
+5. **既存WordPress(mirise-ortho.com)への設置**: `npm run build` の `out/` を
+   ドキュメントルート直下の `media/` フォルダへアップロード(basePath `/media` 済)。
+   ルート `robots.txt` に `Sitemap: .../media/sitemap.xml` を追記し `/media/` を塞がないこと。
 
 記事の `reviewStatus` が `published` 以外の場合、ページ上部にドラフトバナーが表示される。
 監修・コンプラ完了ごとに `lib/articles.ts` のステータスを更新すること。
