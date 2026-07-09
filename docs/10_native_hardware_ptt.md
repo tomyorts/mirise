@@ -174,7 +174,45 @@ useRemotePtt(() => void setMic(!micOn), connected);
 
 ---
 
+## 6.5 ポケット運用（バックグラウンド動作）— Phase A 実装
+
+要件: 画面OFF・ポケットの中でも「聞ける／話せる／ボタンで送信」できること。
+
+### 実装済み（Phase A）
+- `app.json`: `UIBackgroundModes: ["audio"]`（設定済み）
+- `App.tsx` 接続時に音声セッションをVoIP向けに設定:
+  ```ts
+  await AudioSession.configureAudio({ ios: { defaultOutput: "earpiece" } });
+  await AudioSession.setAppleAudioConfiguration({
+    audioCategory: "playAndRecord",
+    audioMode: "voiceChat",
+    audioCategoryOptions: ["allowBluetooth", "allowBluetoothA2DP"],
+  });
+  await AudioSession.startAudioSession();
+  ```
+
+### 実地テスト（再ビルド後・これで判断する）
+1. iPhoneをBLEイヤホンに接続してルームに接続
+2. **画面をロック（またはアプリを裏に）してポケットへ**
+3. 別端末（Web版）から話す → **ロック中でも聞こえるか**（=バックグラウンド"受信"）
+4. **ボタンを押す → 🔴送信 → 相手に届くか**（=バックグラウンド"送信"＋"ボタン"）
+   - ここが本命の検証ポイント
+5. これを**数分〜1シフト**続けて、途中で切れないか（iOSの省電力停止が起きないか）
+
+### 想定される結果と次の一手
+| 結果 | 判断 |
+|---|---|
+| ✅ ロック中も聞ける・話せる・ボタンも効く | Phase Aで実運用可。自動オフ時間等を調整して完成 |
+| △ 聞けるが、**ロック中はボタンが効かない** | iOSはキー入力を前面アプリに送るため（既知の制約）。→ **Phase B（Push to Talk フレームワーク）**へ。ボタンとバックグラウンドが正規サポートされる |
+| ❌ 数分でロック中に切れる | iOSの省電力。→ Phase B（PTTフレームワーク／CallKit）が必要 |
+
+> 注: バックグラウンドで確実に効くボタンは iOS では **メディア再生/停止（MPRemoteCommandCenter）系**。
+> キーボード式BLEリモコン（矢印/Enter）は**前面時は確実**だが**バックグラウンドでは届かない**可能性が高い。
+> ポケット運用で確実にしたい場合の本命は **Phase B: PushToTalk フレームワーク**。
+
+---
+
 ## 7. まとめ
-- ネイティブなら**イヤホンのボタンでPTT（トグル）が実現可能**。これがアプリ化の目的。
-- 実装は「小さな専用ネイティブモジュール（MPRemoteCommandCenter）」が最小・確実。
-- コードは本ドキュメントに用意済み。**Apple有効化 → Phase 2実機確認 → 本モジュール追加 → 実機でボタン確認**、の順で進める。
+- ネイティブなら**ボタンでPTT（トグル）が実現可能**。これがアプリ化の目的。
+- 実装は「小さな専用ネイティブモジュール（MPRemoteCommandCenter＋GameControllerキーボード）」が最小・確実。
+- **前面利用**は実装済みで確実。**ポケット運用（バックグラウンド）**は Phase A を実装済み、実地テストで可否を判断 → 必要なら **Phase B（Push to Talk フレームワーク）** へ。

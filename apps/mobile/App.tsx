@@ -79,6 +79,19 @@ export default function App() {
     setConnecting(true);
     try {
       await cleanup();
+
+      // バックグラウンド(ポケット/画面OFF)でも音声を維持するための設定。
+      // playAndRecord + voiceChat + Bluetooth許可。app.json の UIBackgroundModes:["audio"] と併用。
+      // configureAudio は接続前に呼ぶ必要がある。
+      await AudioSession.configureAudio({
+        // イヤホン非接続時は受話口(プライベート)へ。スピーカーで患者に聞こえるのを防ぐ。
+        ios: { defaultOutput: "earpiece" },
+      });
+      await AudioSession.setAppleAudioConfiguration({
+        audioCategory: "playAndRecord",
+        audioMode: "voiceChat",
+        audioCategoryOptions: ["allowBluetooth", "allowBluetoothA2DP"],
+      });
       await AudioSession.startAudioSession();
 
       const headers: Record<string, string> = { "Content-Type": "application/json" };
