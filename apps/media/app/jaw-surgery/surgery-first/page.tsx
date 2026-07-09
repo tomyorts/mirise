@@ -1,4 +1,5 @@
 import ArticleLayout from '@/components/ArticleLayout';
+import Link from 'next/link';
 import DisclosureBlock from '@/components/DisclosureBlock';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
@@ -89,7 +90,7 @@ export default function Page() {
       <h2 id="hoken">保険適用との関係</h2>
       <p>
         顎変形症として保険診療の要件(診断・指定医療機関・手術を含む治療計画)を満たす場合、サージェリーファーストも保険適用の対象になり得ます。ただし、医療機関の体制や使用装置の要件によって扱いが異なるため、診断時に治療計画と費用区分を必ず確認してください。詳しくは
-        <a href="/jaw-surgery/hoken-tekiyo/">保険適用の完全ガイド</a>
+        <Link href="/jaw-surgery/hoken-tekiyo/">保険適用の完全ガイド</Link>
         をご覧ください。
       </p>
 

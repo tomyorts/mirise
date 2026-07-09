@@ -3,13 +3,13 @@ import Link from 'next/link';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import JsonLd from '@/components/JsonLd';
 import { GLOSSARY, GLOSSARY_CATEGORIES } from '@/lib/glossary';
-import { SITE } from '@/lib/site';
+import { SITE, abs } from '@/lib/site';
 
 export const metadata: Metadata = {
   title: '矯正歯科の用語集:患者向けにやさしく解説',
   description:
     '顎変形症・外科矯正・サージェリーファースト・咬合・保定など、矯正歯科でよく使われる用語を、矯正歯科医師がやさしく解説する用語集です。',
-  alternates: { canonical: '/glossary/' },
+  alternates: { canonical: abs('/glossary/') },
 };
 
 // DefinedTermSet: 各用語を定義文とともにAI検索へ提示(docs/media/06)

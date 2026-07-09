@@ -1,16 +1,27 @@
+// メディアは既存クリニックサイト(mirise-ortho.com, WordPress, 月間約4万PV)の
+// サブディレクトリ /media/ 配下で配信する。origin=ドメイン, basePath=サブパス, url=両者の連結。
+// SITE.url は全JSON-LDの@id・canonical・OGP・sitemap の絶対URLの基点になる。
+const ORIGIN = 'https://mirise-ortho.com';
+const BASE_PATH = '/media'; // next.config.mjs の basePath と一致させること
+
 export const SITE = {
   name: 'キョウセイの前に',
   tagline: '矯正治療の意思決定ガイド',
-  url: 'https://mirise-ortho.com',
+  origin: ORIGIN,
+  basePath: BASE_PATH,
+  url: `${ORIGIN}${BASE_PATH}`,
   operator: {
     name: 'ミライズ矯正歯科南青山',
-    url: 'https://example.com/clinic', // TODO: 医院公式サイトURL
-    address: '東京都港区', // TODO: 正式住所
-    tel: '00-0000-0000', // TODO: 代表電話
+    url: `${ORIGIN}/`, // 医院公式サイト(既存クリニックサイト)
+    address: '東京都港区', // TODO: 正式住所(監修時に確定)
+    tel: '00-0000-0000', // TODO: 代表電話(監修時に確定)
   },
   description:
     '矯正治療を始めるかどうか、誰に任せるかを考えている方のための意思決定支援メディア。顎変形症・外科矯正・再治療など、普通の矯正情報では答えが見つからない方のための一次情報を、矯正歯科専門医の実名監修でお届けします。',
 } as const;
+
+// canonical / OGP / JSON-LD 用の絶対URLを生成する(basePath /media を含む)。
+export const abs = (path: string) => `${SITE.url}${path}`;
 
 export type ReviewStatus = 'draft' | 'reviewed' | 'compliance_checked' | 'published';
 

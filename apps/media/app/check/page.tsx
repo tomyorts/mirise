@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { abs } from '@/lib/site';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import SelfCheck from '@/components/SelfCheck';
 
@@ -6,7 +7,7 @@ export const metadata: Metadata = {
   title: '3分セルフチェック:あなたが今読むべき記事',
   description:
     '3つの質問に答えると、あなたの状況(受け口・開咬・抜歯・費用・治療中の不安など)に合った記事と、相談すべきかどうかの目安が分かります。',
-  alternates: { canonical: '/check/' },
+  alternates: { canonical: abs('/check/') },
 };
 
 export default function CheckPage() {

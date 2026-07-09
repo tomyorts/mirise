@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { articlePath, type ArticleMeta } from './articles';
-import { SITE } from './site';
+import { SITE, abs } from './site';
 
 // 記事ページ共通のSEOメタデータ(OGP/canonical)。全記事ページで使用する
 export function articleMetadata(meta: ArticleMeta): Metadata {
@@ -8,11 +8,11 @@ export function articleMetadata(meta: ArticleMeta): Metadata {
   return {
     title: meta.title,
     description: meta.summary,
-    alternates: { canonical: path },
+    alternates: { canonical: abs(path) },
     openGraph: {
       title: meta.title,
       description: meta.summary,
-      url: path,
+      url: abs(path),
       type: 'article',
       siteName: SITE.name,
       locale: 'ja_JP',

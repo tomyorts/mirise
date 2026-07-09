@@ -2,13 +2,13 @@ import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import JsonLd from '@/components/JsonLd';
 import Link from 'next/link';
-import { SITE } from '@/lib/site';
+import { SITE, abs } from '@/lib/site';
 
 export const metadata: Metadata = {
   title: '難症例のご相談',
   description:
     '顎変形症・外科矯正・サージェリーファースト・再治療・咬合再建のご相談。診断と治療計画の設計が結果を左右するケースを、専門医が診察します。適応でない場合は率直にお伝えします。',
-  alternates: { canonical: '/consult/complex-cases/' },
+  alternates: { canonical: abs('/consult/complex-cases/') },
 };
 
 const FAQ = [

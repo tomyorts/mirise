@@ -4,7 +4,7 @@ import Breadcrumbs from '@/components/Breadcrumbs';
 import JsonLd from '@/components/JsonLd';
 import { AUTHORS } from '@/lib/authors';
 import { ARTICLES, articlePath } from '@/lib/articles';
-import { SITE } from '@/lib/site';
+import { SITE, abs } from '@/lib/site';
 
 export function generateStaticParams() {
   return Object.keys(AUTHORS).map((id) => ({ id }));
@@ -21,7 +21,7 @@ export async function generateMetadata({
   return {
     title: `${a.name}(監修者プロフィール)`,
     description: `${a.title}。${a.bio}`,
-    alternates: { canonical: `/about/authors/${a.id}/` },
+    alternates: { canonical: abs(`/about/authors/${a.id}/`) },
   };
 }
 

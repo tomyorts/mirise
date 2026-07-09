@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { abs } from '@/lib/site';
 import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import { ARTICLES, articlePath } from '@/lib/articles';
@@ -7,7 +8,7 @@ export const metadata: Metadata = {
   title: '治療法を正しく理解する',
   description:
     'ワイヤー矯正・マウスピース矯正の適応の科学、デジタル矯正・3Dシミュレーションで分かること、抜歯・非抜歯の判断基準。装置の宣伝ではなく適応を理解するためのカテゴリ。',
-  alternates: { canonical: '/treatment/' },
+  alternates: { canonical: abs('/treatment/') },
 };
 
 export default function TreatmentIndex() {

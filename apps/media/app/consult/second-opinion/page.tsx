@@ -2,13 +2,13 @@ import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import JsonLd from '@/components/JsonLd';
 import Link from 'next/link';
-import { SITE } from '@/lib/site';
+import { SITE, abs } from '@/lib/site';
 
 export const metadata: Metadata = {
   title: 'オンラインセカンドオピニオン',
   description:
     '矯正の診断・治療計画について、資料に基づき第三者の専門医が意見をお伝えします。抜歯・手術の要否、治療中の不安、再治療のご相談に。自由診療・費用明記。',
-  alternates: { canonical: '/consult/second-opinion/' },
+  alternates: { canonical: abs('/consult/second-opinion/') },
 };
 
 const FAQ = [

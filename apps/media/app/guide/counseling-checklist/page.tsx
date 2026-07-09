@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { abs } from '@/lib/site';
 import Link from 'next/link';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import PrintButton from '@/components/PrintButton';
@@ -7,7 +8,7 @@ export const metadata: Metadata = {
   title: '矯正カウンセリング準備チェックリスト(印刷・持参用)',
   description:
     'カウンセリング前に確認しておくこと、当日に必ず聞くべき質問、持ち物を1枚にまとめた準備チェックリスト。印刷して持参できます。',
-  alternates: { canonical: '/guide/counseling-checklist/' },
+  alternates: { canonical: abs('/guide/counseling-checklist/') },
 };
 
 const BRING = [
