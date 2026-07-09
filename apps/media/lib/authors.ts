@@ -13,10 +13,10 @@ export type Author = {
 export const AUTHORS: Record<string, Author> = {
   director: {
     id: 'director',
-    name: '院長(氏名確定待ち)',
+    name: '富田大介',
     title: 'ミライズ矯正歯科南青山 院長・歯科医師',
     qualifications: ['歯科医師', '(認定資格・所属学会を確定して記載)'],
-    bio: '矯正歯科・顎変形症・外科矯正・サージェリーファースト・デジタル矯正・咬合再建を専門とする。(経歴を確定して記載)',
+    bio: '富田大介。ミライズ矯正歯科南青山 院長。矯正歯科・顎変形症・外科矯正・サージェリーファースト・デジタル矯正・咬合再建を専門とする。(資格・経歴を確定して記載)',
     sameAs: [],
     specialties: [
       '顎変形症・外科的矯正治療',

@@ -1,8 +1,7 @@
 export const SITE = {
   name: 'キョウセイの前に',
   tagline: '矯正治療の意思決定ガイド',
-  // TODO: ドメイン確定後に差し替え(docs/media/01_brand_positioning.md)
-  url: 'https://example.com',
+  url: 'https://mirise-ortho.com',
   operator: {
     name: 'ミライズ矯正歯科南青山',
     url: 'https://example.com/clinic', // TODO: 医院公式サイトURL
