@@ -445,6 +445,68 @@ strong { font-weight: 600; background: linear-gradient(transparent 68%, var(--ac
 .related .article-list { margin-top: 8px; }
 .related .article-list a { padding: 14px 6px; }
 
+/* ---------- チェックリスト(リード獲得ツール) ---------- */
+.print-btn {
+  font: inherit; font-size: 0.9rem; font-weight: 600; color: #fff;
+  background: var(--accent); border: none; border-radius: 6px;
+  padding: 10px 22px; cursor: pointer; margin: 4px 0 8px;
+}
+.print-btn:hover { background: var(--accent-strong); }
+.checklist-sheet {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 8px 28px 24px; margin: 24px 0;
+}
+.checklist-group { border-bottom: 1px solid var(--line); padding: 18px 0; }
+.checklist-group:last-child { border-bottom: none; }
+.checklist-group h3 {
+  font-family: var(--font-serif); font-size: 1.05rem; margin: 0 0 12px; font-weight: 600;
+}
+ul.checklist { list-style: none; padding: 0; margin: 0; }
+ul.checklist li {
+  position: relative; padding: 8px 8px 8px 34px; font-size: 0.93rem;
+  border-bottom: 1px dashed var(--line); line-height: 1.8;
+}
+ul.checklist li:last-child { border-bottom: none; }
+ul.checklist li::before {
+  content: ''; position: absolute; left: 4px; top: 12px;
+  width: 18px; height: 18px; border: 1.5px solid var(--line-strong); border-radius: 4px;
+}
+@media print {
+  .site-header, .site-footer, .breadcrumbs, .print-btn, .note, .cta-block { display: none !important; }
+  .page-header .eyebrow { display: none; }
+  .checklist-sheet { border-color: #000; }
+  ul.checklist li::before { border-color: #000; }
+  body { font-size: 12px; }
+  h1 { font-size: 1.3rem; }
+}
+
+/* ---------- 用語集 ---------- */
+.glossary-toc {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0;
+}
+.glossary-toc a {
+  font-size: 0.82rem; text-decoration: none; color: var(--accent);
+  border: 1px solid var(--accent-line); border-radius: 100px; padding: 4px 14px;
+}
+.glossary-toc a:hover { background: var(--accent-soft); }
+.glossary-group { margin: 40px 0 0; }
+.glossary-group > h2 {
+  font-family: var(--font-serif); font-size: 1.25rem; font-weight: 600;
+  border-left: 4px solid var(--accent); border-bottom: 1px solid var(--line);
+  padding: 0 0 0.35em 0.8em; margin: 0 0 8px;
+}
+.glossary-term {
+  border-bottom: 1px solid var(--line); padding: 20px 0; scroll-margin-top: 90px;
+}
+.glossary-term:last-child { border-bottom: none; }
+.glossary-term dt {
+  font-family: var(--font-serif); font-weight: 600; font-size: 1.05rem; margin: 0 0 2px;
+}
+.glossary-term .reading { font-size: 0.78rem; color: var(--ink-faint); font-weight: 400; margin-left: 8px; font-family: var(--font-sans); }
+.glossary-term dd { margin: 6px 0 0; font-size: 0.95rem; line-height: 1.95; }
+.glossary-term .also { color: var(--ink-soft); font-size: 0.88rem; margin-top: 6px; }
+.glossary-term .more { font-size: 0.82rem; margin-top: 6px; }
+
 /* ---------- 404 ---------- */
 .not-found { text-align: center; padding: 100px 22px; }
 .not-found h1 { font-size: 1.4rem; }

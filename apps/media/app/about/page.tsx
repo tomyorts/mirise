@@ -68,10 +68,15 @@ export default function About() {
             医
           </span>
           <div className="body">
-            <span className="name">{director.name}</span>
+            <span className="name">
+              <Link href={`/about/authors/${director.id}/`}>{director.name}</Link>
+            </span>
             <span className="role">{director.title}</span>
             <p>{director.bio}</p>
             <p>資格・所属: {director.qualifications.join('、')}</p>
+            <p>
+              <Link href={`/about/authors/${director.id}/`}>監修者プロフィール(経歴・専門・監修記事)</Link>
+            </p>
           </div>
         </div>
         <p style={{ marginTop: 16 }}>

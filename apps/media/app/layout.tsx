@@ -57,6 +57,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <Link href="/jaw-surgery/">難症例・外科矯正</Link>
               <Link href="/treatment/">治療法を知る</Link>
               <Link href="/faq/">よくある質問</Link>
+              <Link href="/glossary/">用語集</Link>
               <Link href="/about/">運営者情報</Link>
               <Link href="/consult/second-opinion/" className="nav-consult">
                 相談する
@@ -94,6 +95,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   </li>
                   <li>
                     <Link href="/faq/">よくある誤解と不安</Link>
+                  </li>
+                  <li>
+                    <Link href="/glossary/">矯正用語集</Link>
+                  </li>
+                  <li>
+                    <Link href="/guide/counseling-checklist/">カウンセリング準備チェックリスト</Link>
                   </li>
                 </ul>
               </div>

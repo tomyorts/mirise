@@ -36,6 +36,7 @@ export default function ArticleLayout({
     author: { '@type': 'Person', name: author.name, jobTitle: author.title },
     reviewedBy: {
       '@type': 'Physician',
+      '@id': `${SITE.url}/about/authors/${reviewer.id}/#person`,
       name: reviewer.name,
       medicalSpecialty: 'https://schema.org/Dentistry',
       worksFor: { '@type': 'MedicalClinic', '@id': `${SITE.url}/about/#clinic`, name: SITE.operator.name },
@@ -153,11 +154,14 @@ export default function ArticleLayout({
             医
           </span>
           <div className="body">
-            <span className="name">{reviewer.name}</span>
+            <span className="name">
+              <Link href={`/about/authors/${reviewer.id}/`}>{reviewer.name}</Link>
+            </span>
             <span className="role">{reviewer.title}</span>
             <p>{reviewer.bio}</p>
             <p>
-              <Link href="/about/">監修体制について</Link>
+              <Link href={`/about/authors/${reviewer.id}/`}>監修者プロフィール</Link> /{' '}
+              <Link href="/about/editorial-policy/">監修体制について</Link>
             </p>
           </div>
         </aside>
