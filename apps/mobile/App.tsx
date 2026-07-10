@@ -12,6 +12,7 @@ import {
 import { AudioSession, registerGlobals } from "@livekit/react-native";
 import { Room, RoomEvent } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
+import PttChannel from "./modules/ptt-channel";
 
 // 止め忘れ防止: トグルでONにしたら一定時間で自動OFF(ミリ秒)。
 const AUTO_OFF_MS = 30_000;
@@ -42,6 +43,9 @@ export default function App() {
   const [connecting, setConnecting] = useState(false);
   const [micOn, setMicOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Phase B: ポケット/バックグラウンド送信(PushToTalkフレームワーク)。
+  const [pttJoined, setPttJoined] = useState(false);
+  const [pttBusy, setPttBusy] = useState(false);
   // トグル判定を最新値で行うための参照 + 自動OFFタイマー。
   const micOnRef = useRef(false);
   const autoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -165,6 +169,57 @@ export default function App() {
   // 接続中だけイヤホンのハードボタンを購読する。
   useRemotePtt(toggleMic, connected);
 
+  // Phase B: PushToTalkフレームワークのイベントを購読。
+  // システム(ロック画面/ポケット)からの送信開始/停止で LiveKit のマイクをON/OFF。
+  useEffect(() => {
+    if (!PttChannel) return;
+    const subs = [
+      PttChannel.addListener("onJoin", () => setPttJoined(true)),
+      PttChannel.addListener("onLeave", () => setPttJoined(false)),
+      PttChannel.addListener("onBeginTransmitting", () => void setMic(true)),
+      PttChannel.addListener("onEndTransmitting", () => void setMic(false)),
+      PttChannel.addListener("onError", () => {}),
+    ];
+    return () => subs.forEach((s) => s?.remove());
+  }, [setMic]);
+
+  // PTTチャンネルに参加/退出。
+  const joinPtt = useCallback(async () => {
+    if (!PttChannel) {
+      setError("この端末はPushToTalk未対応です(iOS16以上＋開発ビルドが必要)");
+      return;
+    }
+    setPttBusy(true);
+    try {
+      await PttChannel.join("MIRISE Intercom");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "PTT参加に失敗しました");
+    } finally {
+      setPttBusy(false);
+    }
+  }, []);
+
+  const leavePtt = useCallback(async () => {
+    if (!PttChannel) return;
+    setPttBusy(true);
+    try {
+      await PttChannel.leave();
+      setPttJoined(false);
+    } catch {
+      // noop
+    } finally {
+      setPttBusy(false);
+    }
+  }, []);
+
+  // 「話す」ホールド: 押している間だけ送信(PTKit経由)。
+  const pttPressIn = useCallback(() => {
+    void PttChannel?.beginTransmitting();
+  }, []);
+  const pttPressOut = useCallback(() => {
+    void PttChannel?.endTransmitting();
+  }, []);
+
   useEffect(() => {
     return () => {
       void cleanup();
@@ -256,6 +311,41 @@ export default function App() {
               切り忘れ防止のため、送信は約30秒で自動停止します。
               診療中は患者情報を言わず、チェア番号やセット名で運用してください。
             </Text>
+          </View>
+        ) : null}
+
+        {connected ? (
+          <View style={styles.card}>
+            <Text style={styles.cardLabel}>📱 ポケット送信（実験・Phase B）</Text>
+            <Text style={styles.hint}>
+              画面OFF・ポケットの中でも話せるかの検証です。まず「PTTを有効化」→ 下の「話す」を
+              押しながら発声。動いたら、画面ロック中やロック画面のトーク表示からも試してください。
+            </Text>
+
+            {!pttJoined ? (
+              <Pressable
+                style={[styles.primary, pttBusy && styles.disabled]}
+                onPress={() => void joinPtt()}
+                disabled={pttBusy}
+              >
+                <Text style={styles.primaryText}>
+                  {pttBusy ? "準備中..." : "PTTを有効化（参加）"}
+                </Text>
+              </Pressable>
+            ) : (
+              <>
+                <Pressable
+                  style={[styles.ptt, micOn && styles.pttOn]}
+                  onPressIn={pttPressIn}
+                  onPressOut={pttPressOut}
+                >
+                  <Text style={styles.pttText}>話す（PTT）</Text>
+                </Pressable>
+                <Pressable style={styles.secondary} onPress={() => void leavePtt()}>
+                  <Text style={styles.secondaryText}>PTTを無効化（退出）</Text>
+                </Pressable>
+              </>
+            )}
           </View>
         ) : null}
 
