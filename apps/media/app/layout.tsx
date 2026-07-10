@@ -38,12 +38,26 @@ const orgLd = {
   },
 };
 
+// サイト実体(AI検索・エンティティグラフ用)。発行主体はOrganizationに紐づける。
+const websiteLd = {
+  '@context': 'https://schema.org',
+  '@type': 'WebSite',
+  '@id': `${SITE.url}/#website`,
+  name: SITE.name,
+  alternateName: SITE.tagline,
+  url: SITE.url,
+  inLanguage: 'ja',
+  description: SITE.description,
+  publisher: { '@id': `${SITE.url}/about/#organization` },
+};
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="ja">
       <body>
         <Analytics />
         <JsonLd data={orgLd} />
+        <JsonLd data={websiteLd} />
         <a href="#main" className="skip-link">
           本文へスキップ
         </a>

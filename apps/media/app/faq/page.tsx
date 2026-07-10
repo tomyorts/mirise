@@ -1,12 +1,15 @@
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
+import CheckNudge from '@/components/CheckNudge';
 import { ARTICLES, articlePath } from '@/lib/articles';
+import { abs } from '@/lib/site';
 
 export const metadata: Metadata = {
   title: 'よくある誤解と不安',
   description:
     'カウンセリングで実際にいただく質問に、1つずつ矯正歯科医師が答えます。マウスピース矯正、非抜歯、年齢、顔の変化。',
+  alternates: { canonical: abs('/faq/') },
 };
 
 export default function FaqIndex() {
@@ -36,6 +39,7 @@ export default function FaqIndex() {
           ここにない疑問をお持ちの方へ:
           記事末尾の相談窓口からいただいた質問は、個人が特定されない形でこのコーナーの新しい記事の題材にさせていただくことがあります。
         </p>
+        <CheckNudge position="cat_faq" />
       </div>
     </>
   );

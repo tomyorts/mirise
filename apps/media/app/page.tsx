@@ -1,5 +1,14 @@
 import Link from 'next/link';
+import type { Metadata } from 'next';
+import TrackedLink from '@/components/TrackedLink';
+import CheckNudge from '@/components/CheckNudge';
 import { ARTICLES, articlePath, CATEGORY_LABEL } from '@/lib/articles';
+import { SITE, abs } from '@/lib/site';
+
+export const metadata: Metadata = {
+  title: { absolute: `${SITE.name}|${SITE.tagline}` },
+  alternates: { canonical: abs('/') },
+};
 
 // トップ=「意思決定の入口」。新着一覧ではなく、読者の状況から入る(docs/media/02)
 const SITUATIONS = [
@@ -69,9 +78,14 @@ export default function Home() {
             <p className="title">どの記事から読めばいいか分からない方へ</p>
             <p>3つの質問に答えると、あなたの状況に合った記事と相談の目安をご案内します(個人情報の入力は不要)。</p>
           </div>
-          <Link className="cta-button" href="/check/">
+          <TrackedLink
+            className="cta-button"
+            href="/check/"
+            event="cta_click"
+            params={{ cta_position: 'home_hero', cta_target: 'self_check' }}
+          >
             3分セルフチェックを始める
-          </Link>
+          </TrackedLink>
         </div>
       </aside>
 
@@ -152,6 +166,8 @@ export default function Home() {
           ))}
         </ul>
       </section>
+
+      <CheckNudge position="home_bottom" />
     </>
   );
 }

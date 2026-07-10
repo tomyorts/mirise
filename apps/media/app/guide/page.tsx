@@ -1,12 +1,15 @@
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
+import CheckNudge from '@/components/CheckNudge';
 import { ARTICLES, articlePath } from '@/lib/articles';
+import { abs } from '@/lib/site';
 
 export const metadata: Metadata = {
   title: '意思決定ガイド',
   description:
     '矯正治療を始めるかどうか、誰に任せるかを決めるための常設ガイド。カウンセリングの聞き方、セカンドオピニオン、費用と転院の考え方。',
+  alternates: { canonical: abs('/guide/') },
 };
 
 
@@ -33,6 +36,7 @@ export default function GuideIndex() {
             </li>
           ))}
         </ul>
+        <CheckNudge position="cat_guide" />
       </div>
     </>
   );

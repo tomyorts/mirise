@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { abs } from '@/lib/site';
 import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
+import CheckNudge from '@/components/CheckNudge';
 import { ARTICLES, articlePath } from '@/lib/articles';
 
 export const metadata: Metadata = {
@@ -34,6 +35,7 @@ export default function TreatmentIndex() {
             </li>
           ))}
         </ul>
+        <CheckNudge position="cat_treatment" />
       </div>
     </>
   );

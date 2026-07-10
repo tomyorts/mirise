@@ -1,12 +1,15 @@
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
+import CheckNudge from '@/components/CheckNudge';
 import { ARTICLES, articlePath } from '@/lib/articles';
+import { abs } from '@/lib/site';
 
 export const metadata: Metadata = {
   title: '難症例・外科矯正',
   description:
     '顎変形症・外科矯正・サージェリーファースト・再治療・咬合再建。「普通の矯正情報では答えが見つからない」方のための専門医による一次情報。',
+  alternates: { canonical: abs('/jaw-surgery/') },
 };
 
 
@@ -33,6 +36,7 @@ export default function JawSurgeryIndex() {
             </li>
           ))}
         </ul>
+        <CheckNudge position="cat_jaw_surgery" withConsult />
       </div>
     </>
   );
