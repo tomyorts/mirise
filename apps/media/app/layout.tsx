@@ -7,7 +7,9 @@ import Analytics from '@/components/Analytics';
 import './globals.css';
 
 export const metadata: Metadata = {
-  metadataBase: new URL(SITE.url),
+  // origin(ドメイン直下)を基点にする。basePath(/media)はNextが自動付与するため、
+  // ここに /media を含めると og:image 等が二重(/media/media)になる。
+  metadataBase: new URL(SITE.origin),
   title: {
     default: `${SITE.name}|${SITE.tagline}`,
     template: `%s|${SITE.name}`,

@@ -26,6 +26,21 @@ npm run build # 静的エクスポート(out/)
 - JSON-LD: MedicalWebPage / FAQPage / Physician / MedicalClinic / Organization / MedicalCondition / speakable
 - 関連記事による回遊、OGP/canonical(lib/metadata.ts)、llms.txt
 - 自由診療の定型ブロック(DisclosureBlock)
+- OGP画像の自動生成(全ページ+記事別の日本語カード。`lib/og.tsx`+各`opengraph-image.tsx`)
+- GA4計測基盤+CV相談導線(`lib/analytics.ts` / `components/Analytics.tsx` ほか。docs/media/08)
+
+### OGP画像について
+`next/og`で日本語カードを静的生成する。日本語フォントは`assets/fonts/ipagp-og.ttf`
+(IPAゴシックのサブセット。ライセンスは同ディレクトリ)。
+記事タイトルを変更・追加したら次を実行して再生成する:
+
+```bash
+python3 scripts/subset-og-font.py   # 新しい漢字が増えた場合のみ(IPAフォントが必要)
+python3 scripts/gen-og-routes.py    # 記事別 opengraph-image.tsx を再生成
+```
+
+`npm run build`の後処理(`scripts/fix-og-extensions.mjs`)で、拡張子なしの
+OGP画像を`.png`にリネームしHTML参照も書き換える(Apache/WordPress配信対応)。
 
 ## 公開前に必須の作業(このままでは公開しない)
 
