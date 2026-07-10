@@ -2,7 +2,9 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import CheckNudge from '@/components/CheckNudge';
+import JsonLd from '@/components/JsonLd';
 import { ARTICLES, articlePath } from '@/lib/articles';
+import { itemListLd } from '@/lib/jsonld';
 import { abs } from '@/lib/site';
 
 export const metadata: Metadata = {
@@ -19,6 +21,7 @@ export default function GuideIndex() {
     <>
       <Breadcrumbs items={[{ label: '意思決定ガイド' }]} />
       <div className="container">
+        <JsonLd data={itemListLd(items, '意思決定ガイド 記事一覧')} />
         <header className="page-header">
           <p className="eyebrow">GUIDE</p>
           <h1>意思決定ガイド</h1>

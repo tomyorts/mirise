@@ -2,7 +2,9 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import CheckNudge from '@/components/CheckNudge';
+import JsonLd from '@/components/JsonLd';
 import { ARTICLES, articlePath } from '@/lib/articles';
+import { itemListLd } from '@/lib/jsonld';
 import { abs } from '@/lib/site';
 
 export const metadata: Metadata = {
@@ -19,6 +21,7 @@ export default function JawSurgeryIndex() {
     <>
       <Breadcrumbs items={[{ label: '難症例・外科矯正' }]} />
       <div className="container">
+        <JsonLd data={itemListLd(items, '難症例・外科矯正の記事一覧')} />
         <header className="page-header">
           <p className="eyebrow">COMPLEX CASES</p>
           <h1>難症例・外科矯正</h1>

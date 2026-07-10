@@ -2,7 +2,9 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import TrackedLink from '@/components/TrackedLink';
 import CheckNudge from '@/components/CheckNudge';
+import JsonLd from '@/components/JsonLd';
 import { ARTICLES, articlePath, CATEGORY_LABEL } from '@/lib/articles';
+import { itemListLd } from '@/lib/jsonld';
 import { SITE, abs } from '@/lib/site';
 
 export const metadata: Metadata = {
@@ -154,6 +156,7 @@ export default function Home() {
 
       <section className="section">
         <h2>すべての記事</h2>
+        <JsonLd data={itemListLd(ARTICLES, `${SITE.name} 記事一覧`)} />
         <ul className="article-list">
           {ARTICLES.map((a) => (
             <li key={articlePath(a)}>

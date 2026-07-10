@@ -2,7 +2,9 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import CheckNudge from '@/components/CheckNudge';
+import JsonLd from '@/components/JsonLd';
 import { ARTICLES, articlePath } from '@/lib/articles';
+import { itemListLd } from '@/lib/jsonld';
 import { abs } from '@/lib/site';
 
 export const metadata: Metadata = {
@@ -18,6 +20,7 @@ export default function FaqIndex() {
     <>
       <Breadcrumbs items={[{ label: 'よくある誤解と不安' }]} />
       <div className="container">
+        <JsonLd data={itemListLd(items, 'よくある誤解と不安 記事一覧')} />
         <header className="page-header">
           <p className="eyebrow">FAQ</p>
           <h1>よくある誤解と不安</h1>

@@ -3,7 +3,9 @@ import { abs } from '@/lib/site';
 import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import CheckNudge from '@/components/CheckNudge';
+import JsonLd from '@/components/JsonLd';
 import { ARTICLES, articlePath } from '@/lib/articles';
+import { itemListLd } from '@/lib/jsonld';
 
 export const metadata: Metadata = {
   title: '治療法を正しく理解する',
@@ -18,6 +20,7 @@ export default function TreatmentIndex() {
     <>
       <Breadcrumbs items={[{ label: '治療法を正しく理解する' }]} />
       <div className="container">
+        <JsonLd data={itemListLd(items, '治療法を知る 記事一覧')} />
         <header className="page-header">
           <p className="eyebrow">TREATMENT</p>
           <h1>治療法を正しく理解する</h1>
