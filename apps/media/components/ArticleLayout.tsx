@@ -7,6 +7,7 @@ import Breadcrumbs from './Breadcrumbs';
 import Cta from './Cta';
 import JsonLd from './JsonLd';
 import RelatedArticles from './RelatedArticles';
+import ScrollDepth from './ScrollDepth';
 
 // 記事共通テンプレート(docs/media/02 2.1)
 // パンくず→ヘッダー(執筆・監修・日付)→リード→目次→本文→FAQ→参考文献→執筆者→固定CTA
@@ -70,6 +71,8 @@ export default function ArticleLayout({
       <article className="container">
         <JsonLd data={jsonLd} />
         {faqLd && <JsonLd data={faqLd} />}
+        <ScrollDepth articleId={meta.slug} category={meta.category} />
+
 
         <header className="article-header">
           <h1>{meta.title}</h1>
@@ -166,7 +169,7 @@ export default function ArticleLayout({
           </div>
         </aside>
 
-        <Cta />
+        <Cta articleId={meta.slug} />
       </article>
     </>
   );

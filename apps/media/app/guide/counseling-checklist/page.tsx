@@ -75,7 +75,7 @@ export default function ChecklistPage() {
           <p className="page-lead">
             カウンセリングは、あなたが医院を見極める場でもあります。当日に慌てないよう、確認すること・聞くこと・持ち物を1枚にまとめました。
           </p>
-          <PrintButton label="印刷して持参する(Ctrl / ⌘ + P)" />
+          <PrintButton label="印刷して持参する(Ctrl / ⌘ + P)" event="checklist_download" />
         </header>
 
         <div className="checklist-sheet">

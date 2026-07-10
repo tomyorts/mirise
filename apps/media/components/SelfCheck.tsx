@@ -1,7 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import TrackedLink from './TrackedLink';
+import { track } from '@/lib/analytics';
 import { ARTICLES, articlePath, CATEGORY_LABEL } from '@/lib/articles';
 
 // CVの中核ツール。3問で「読むべき記事」と「相談すべきか」を出し分ける。
@@ -86,6 +88,13 @@ export default function SelfCheck() {
         .filter((a): a is NonNullable<typeof a> => Boolean(a))
     : [];
   const level = done ? ctaLevel(q1!, q2!, q3!) : 'soft';
+
+  // セルフチェック完了を計測(docs/media/08)。CV手前の中間指標。
+  useEffect(() => {
+    if (done) {
+      track('self_check_complete', { q1: q1!, q2: q2!, q3: q3!, cta_level: level });
+    }
+  }, [done, q1, q2, q3, level]);
 
   return (
     <div className="self-check" aria-live="polite">
@@ -173,12 +182,22 @@ export default function SelfCheck() {
                 の可能性があります。記事で全体像を掴んだうえで、専門医への相談をおすすめします。
               </p>
               <div className="cta-buttons">
-                <Link className="cta-button" href="/consult/complex-cases/">
+                <TrackedLink
+                  className="cta-button"
+                  href="/consult/complex-cases/"
+                  event="cta_click"
+                  params={{ cta_position: 'self_check', cta_target: 'complex_cases', cta_level: level }}
+                >
                   難症例のご相談について見る
-                </Link>
-                <Link className="cta-button secondary" href="/consult/second-opinion/">
+                </TrackedLink>
+                <TrackedLink
+                  className="cta-button secondary"
+                  href="/consult/second-opinion/"
+                  event="cta_click"
+                  params={{ cta_position: 'self_check', cta_target: 'second_opinion', cta_level: level }}
+                >
                   オンラインセカンドオピニオン
-                </Link>
+                </TrackedLink>
               </div>
             </div>
           )}
@@ -188,12 +207,22 @@ export default function SelfCheck() {
                 すでに治療の判断に向き合っている段階です。迷いがあるまま契約・継続する前に、第三者の意見を聞く選択肢があります。
               </p>
               <div className="cta-buttons">
-                <Link className="cta-button" href="/consult/second-opinion/">
+                <TrackedLink
+                  className="cta-button"
+                  href="/consult/second-opinion/"
+                  event="cta_click"
+                  params={{ cta_position: 'self_check', cta_target: 'second_opinion', cta_level: level }}
+                >
                   オンラインセカンドオピニオン
-                </Link>
-                <Link className="cta-button secondary" href="/guide/second-opinion/">
+                </TrackedLink>
+                <TrackedLink
+                  className="cta-button secondary"
+                  href="/guide/second-opinion/"
+                  event="cta_click"
+                  params={{ cta_position: 'self_check', cta_target: 'guide_second_opinion', cta_level: level }}
+                >
                   セカンドオピニオンの受け方を読む
-                </Link>
+                </TrackedLink>
               </div>
             </div>
           )}

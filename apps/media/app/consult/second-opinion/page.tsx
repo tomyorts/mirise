@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import JsonLd from '@/components/JsonLd';
+import ConsultContact from '@/components/ConsultContact';
 import Link from 'next/link';
 import { SITE, abs } from '@/lib/site';
 
@@ -107,9 +108,8 @@ export default function SecondOpinionConsult() {
         ))}
 
         <h2>お申し込み・お問い合わせ</h2>
-        <p>
-          予約フォーム(準備中)/ 電話: {SITE.operator.tel}({SITE.operator.name})
-        </p>
+        <p>{SITE.operator.name}にてお受けします。下記よりご連絡ください。</p>
+        <ConsultContact consultType="so" />
       </div>
     </>
   );
