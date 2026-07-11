@@ -317,15 +317,40 @@ strong { font-weight: 600; background: linear-gradient(transparent 68%, var(--ac
 
 /* ---------- トップページ ---------- */
 .hero {
-  max-width: var(--wide); margin: 0 auto; padding: 72px 22px 56px;
+  position: relative; overflow: hidden;
   border-bottom: 1px solid var(--line);
+  background:
+    radial-gradient(120% 90% at 88% -20%, var(--accent-soft), transparent 55%),
+    linear-gradient(180deg, var(--accent-soft) 0%, transparent 40%);
+}
+.hero-inner { max-width: var(--wide); margin: 0 auto; padding: 84px 22px 62px; position: relative; }
+.hero-eyebrow {
+  font-size: 0.76rem; letter-spacing: 0.16em; font-weight: 700; color: var(--accent);
+  margin: 0 0 18px;
 }
 .hero h1 {
-  font-size: clamp(1.6rem, 3.6vw, 2.3rem); line-height: 1.75; margin: 0 0 20px;
+  font-family: var(--font-serif); font-weight: 600;
+  font-size: clamp(1.7rem, 3.8vw, 2.5rem); line-height: 1.62; letter-spacing: 0.01em;
+  margin: 0 0 22px; text-wrap: balance;
 }
-.hero .hero-lead { max-width: 40em; font-size: 1rem; color: var(--ink-soft); }
+.hero .hero-lead { max-width: 40em; font-size: 1.02rem; color: var(--ink-soft); margin: 0; }
+.hero-actions { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; margin: 30px 0 36px; }
+.hero-textlink {
+  color: var(--accent); font-weight: 600; font-size: 0.92rem; text-decoration: none;
+  display: inline-flex; gap: 6px; align-items: center;
+}
+.hero-textlink:hover { text-decoration: underline; }
+.hero-textlink span { transition: transform 0.15s ease; }
+.hero-textlink:hover span { transform: translateX(3px); }
+.hero-trust { display: flex; flex-direction: column; gap: 14px; }
+.hero-sup { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 0.86rem; color: var(--ink-soft); }
+.hero-sup b { color: var(--ink); font-weight: 600; }
+.hero-sup .sup-mark {
+  flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 0.76rem; font-weight: 700;
+}
 .hero .hero-policy {
-  display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px;
+  display: flex; gap: 10px; flex-wrap: wrap;
   font-size: 0.78rem; color: var(--ink-soft);
 }
 .hero .hero-policy span {
@@ -534,7 +559,8 @@ ul.checklist li::before {
 /* ---------- レスポンシブ微調整 ---------- */
 @media (max-width: 640px) {
   body { font-size: 15.5px; }
-  .hero { padding: 48px 22px 40px; }
+  .hero-inner { padding: 52px 22px 42px; }
+  .hero-actions { gap: 16px; }
   h1 { font-size: 1.45rem; }
   h2 { font-size: 1.18rem; }
   .article-meta { gap: 4px 16px; }

@@ -56,40 +56,46 @@ export default function Home() {
   return (
     <>
       <section className="hero">
-        <h1>
-          矯正を「始める前」「決める前」に、
-          <br />
-          知っておくべきことを専門医が整理します。
-        </h1>
-        <p className="hero-lead">
-          キョウセイの前には、矯正治療を始めるかどうか、誰に任せるかを考えている方のための意思決定支援メディアです。顎変形症・外科矯正・再治療など、普通の矯正情報では答えが見つからない方のための一次情報を、矯正歯科医師の実名監修でお届けします。
-        </p>
-        <div className="hero-policy" aria-label="編集方針">
-          <span>医院ランキングなし</span>
-          <span>口コミ掲載なし</span>
-          <span>掲載料・紹介料なし</span>
-          <span>
-            <Link href="/about/editorial-policy/">編集ポリシー</Link>
-          </span>
+        <div className="hero-inner">
+          <p className="hero-eyebrow">矯正治療の意思決定支援メディア</p>
+          <h1>
+            矯正を「始める前」「決める前」に、
+            <br />
+            知っておくべきことを専門医が整理します。
+          </h1>
+          <p className="hero-lead">
+            顎変形症・外科矯正・再治療など、普通の矯正情報では答えが見つからない方へ。治療を始めるか、誰に任せるかを決めるための一次情報を、矯正歯科医師の実名監修でお届けします。
+          </p>
+          <div className="hero-actions">
+            <TrackedLink
+              className="cta-button"
+              href="/check/"
+              event="cta_click"
+              params={{ cta_position: 'home_hero', cta_target: 'self_check' }}
+            >
+              3分セルフチェックで記事を探す
+            </TrackedLink>
+            <Link className="hero-textlink" href="/consult/second-opinion/">
+              相談を検討している方はこちら
+              <span aria-hidden="true">→</span>
+            </Link>
+          </div>
+          <div className="hero-trust">
+            <p className="hero-sup">
+              <span className="sup-mark" aria-hidden="true">医</span>
+              歯科医師 実名監修:<b>富田大介 院長</b>(ミライズ矯正歯科南青山)
+            </p>
+            <div className="hero-policy" aria-label="編集方針">
+              <span>医院ランキングなし</span>
+              <span>口コミ掲載なし</span>
+              <span>掲載料・紹介料なし</span>
+              <span>
+                <Link href="/about/editorial-policy/">編集ポリシー</Link>
+              </span>
+            </div>
+          </div>
         </div>
       </section>
-
-      <aside className="check-banner">
-        <div className="inner">
-          <div>
-            <p className="title">どの記事から読めばいいか分からない方へ</p>
-            <p>3つの質問に答えると、あなたの状況に合った記事と相談の目安をご案内します(個人情報の入力は不要)。</p>
-          </div>
-          <TrackedLink
-            className="cta-button"
-            href="/check/"
-            event="cta_click"
-            params={{ cta_position: 'home_hero', cta_target: 'self_check' }}
-          >
-            3分セルフチェックを始める
-          </TrackedLink>
-        </div>
-      </aside>
 
       <section className="section">
         <h2>あなたの状況から探す</h2>
