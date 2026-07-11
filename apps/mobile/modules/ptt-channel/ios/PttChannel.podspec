@@ -11,6 +11,10 @@ Pod::Spec.new do |s|
 
   s.dependency 'ExpoModulesCore'
 
+  # PushToTalk(iOS16+)を弱リンクする。これが無いとモジュールが実行時に読み込めず、
+  # requireNativeModule が null を返す(iOS16未満でもクラッシュしないよう weak)。
+  s.weak_frameworks = 'PushToTalk'
+
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'SWIFT_COMPILATION_MODE' => 'wholemodule'
