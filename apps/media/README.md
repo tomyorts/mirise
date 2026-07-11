@@ -45,7 +45,7 @@ OGP画像を`.png`にリネームしHTML参照も書き換える(Apache/WordPres
 ## 公開前に必須の作業(このままでは公開しない)
 
 1. **全記事の歯科医師監修**(本文中の「要確認」マーカーの確定)と docs/media/04 のコンプラチェック
-   → 確認すべき箇所は **[docs/media/10_supervision_checklist.md](../../docs/media/10_supervision_checklist.md)**(33件/16記事)に記事別で一覧化済み
+   → 確認すべき箇所は **[docs/media/10_supervision_checklist.md](../../docs/media/10_supervision_checklist.md)**(31件/16記事)に記事別で一覧化済み
 2. ~~`lib/site.ts` / `lib/authors.ts` の実名・住所・電話・ドメインの確定~~ ✅ 確定済
    (ドメイン: mirise-ortho.com のサブディレクトリ `/media/`。監修者: 富田大介 院長。
    住所・電話・略歴は staff ページより反映。※公開時に本人最終確認)
