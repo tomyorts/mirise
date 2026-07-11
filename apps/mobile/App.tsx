@@ -13,6 +13,7 @@ import { AudioSession, registerGlobals } from "@livekit/react-native";
 import { Room, RoomEvent } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
 import PttChannel from "./modules/ptt-channel";
+import RemotePtt from "./modules/remote-ptt";
 
 // 止め忘れ防止: トグルでONにしたら一定時間で自動OFF(ミリ秒)。
 const AUTO_OFF_MS = 30_000;
@@ -319,6 +320,7 @@ export default function App() {
             <Text style={styles.cardLabel}>📱 ポケット送信（実験・Phase B）</Text>
             <Text style={[styles.hint, { color: PttChannel ? "#0f8f4f" : "#c62030" }]}>
               PTTネイティブ: {PttChannel ? "有効（読み込み済み）" : "無効（未読み込み）"}
+              {"\n"}RemotePtt: {RemotePtt ? "有効" : "無効"}（診断用）
             </Text>
             <Text style={styles.hint}>
               画面OFF・ポケットの中でも話せるかの検証です。まず「PTTを有効化」→ 下の「話す」を
