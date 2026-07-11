@@ -1,17 +1,16 @@
 import ExpoModulesCore
 import PushToTalk
 import AVFoundation
-import UIKit
 
-// Apple の PushToTalk フレームワーク(PTChannelManager)を JS へ橋渡しするモジュール。
-// 目的: 画面OFF・ポケットの中でも「話す(送信)」を成立させる(Phase B / Stage 1)。
-// 送信開始/停止イベントを JS に送り、JS 側で LiveKit のマイクをON/OFFする。
-@available(iOS 16.0, *)
+// Apple の PushToTalk(PTChannelManager)を JS へ橋渡しするモジュール。
+// 重要: モジュールクラス自体には @available を付けない。付けると Expo の自動生成する
+// モジュール一覧から除外され、requireNativeModule で見つからなくなる(=登録されない)。
+// iOS16専用APIは実行時に #available で保護し、値は Any でボックス化して保持する。
 public class PttChannelModule: Module {
-  fileprivate var channelManager: PTChannelManager?
+  fileprivate var managerBox: Any?   // PTChannelManager (iOS16+)
+  fileprivate var delegateBox: Any?  // PttDelegate (iOS16+)
   fileprivate var channelUUID: UUID?
   fileprivate var channelName: String = "MIRISE Intercom"
-  private lazy var proxy = PttDelegate(module: self)
 
   public func definition() -> ModuleDefinition {
     Name("PttChannel")
@@ -26,49 +25,81 @@ public class PttChannelModule: Module {
       "onError"
     )
 
-    // PTTチャンネルに参加する。参加すると iOS がバックグラウンド送信を許可する。
     AsyncFunction("join") { (name: String) async throws -> String in
-      self.channelName = name
-      if self.channelManager == nil {
-        self.channelManager = try await PTChannelManager.channelManager(
-          delegate: self.proxy,
-          restorationDelegate: self.proxy
-        )
+      if #available(iOS 16.0, *) {
+        return try await self.joinImpl(name)
       }
-      let uuid = self.channelUUID ?? UUID()
-      self.channelUUID = uuid
-      let descriptor = PTChannelDescriptor(name: name, image: nil)
-      try await self.channelManager?.requestJoinChannel(channelUUID: uuid, descriptor: descriptor)
-      return uuid.uuidString
+      throw NSError(
+        domain: "PttChannel", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "iOS16以上が必要です"]
+      )
     }
 
-    // チャンネルから退出。
     AsyncFunction("leave") { () async throws in
-      if let uuid = self.channelUUID {
-        try await self.channelManager?.leaveChannel(channelUUID: uuid)
-      }
-      self.channelUUID = nil
+      if #available(iOS 16.0, *) { try await self.leaveImpl() }
     }
 
-    // 送信開始を要求(画面の「話す」ボタン用)。成功すると onBeginTransmitting が返る。
     AsyncFunction("beginTransmitting") { () async throws in
-      guard let uuid = self.channelUUID else { return }
-      try await self.channelManager?.requestBeginTransmitting(channelUUID: uuid)
+      if #available(iOS 16.0, *) { try await self.beginImpl() }
     }
 
-    // 送信停止。
     AsyncFunction("endTransmitting") { () async throws in
-      guard let uuid = self.channelUUID else { return }
-      await self.channelManager?.stopTransmitting(channelUUID: uuid)
+      if #available(iOS 16.0, *) { await self.endImpl() }
     }
   }
 
   fileprivate func emit(_ name: String, _ payload: [String: Any] = [:]) {
     sendEvent(name, payload)
   }
+
+  // MARK: - iOS16専用の実装(実行時ガード後にのみ呼ばれる)
+
+  @available(iOS 16.0, *)
+  private func manager() async throws -> PTChannelManager {
+    if let existing = managerBox as? PTChannelManager { return existing }
+    let delegate = PttDelegate(module: self)
+    delegateBox = delegate
+    let created = try await PTChannelManager.channelManager(
+      delegate: delegate,
+      restorationDelegate: delegate
+    )
+    managerBox = created
+    return created
+  }
+
+  @available(iOS 16.0, *)
+  private func joinImpl(_ name: String) async throws -> String {
+    channelName = name
+    let m = try await manager()
+    let uuid = channelUUID ?? UUID()
+    channelUUID = uuid
+    let descriptor = PTChannelDescriptor(name: name, image: nil)
+    try await m.requestJoinChannel(channelUUID: uuid, descriptor: descriptor)
+    return uuid.uuidString
+  }
+
+  @available(iOS 16.0, *)
+  private func leaveImpl() async throws {
+    if let uuid = channelUUID, let m = managerBox as? PTChannelManager {
+      try await m.leaveChannel(channelUUID: uuid)
+    }
+    channelUUID = nil
+  }
+
+  @available(iOS 16.0, *)
+  private func beginImpl() async throws {
+    guard let uuid = channelUUID, let m = managerBox as? PTChannelManager else { return }
+    try await m.requestBeginTransmitting(channelUUID: uuid)
+  }
+
+  @available(iOS 16.0, *)
+  private func endImpl() async {
+    guard let uuid = channelUUID, let m = managerBox as? PTChannelManager else { return }
+    await m.stopTransmitting(channelUUID: uuid)
+  }
 }
 
-// PTChannelManager のデリゲート。イベントを JS へ転送する。
+// PTChannelManager のデリゲート(iOS16専用)。iOS16以降でのみ生成される。
 @available(iOS 16.0, *)
 final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestorationDelegate {
   weak var module: PttChannelModule?
@@ -106,12 +137,10 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
     module?.emit("onPushToken", ["token": token])
   }
 
-  // 受信プッシュ(Stage 2で実装)。今は最小の実装。
   func incomingPushResult(channelManager: PTChannelManager, channelUUID: UUID, pushPayload: [String: Any]) -> PTPushResult {
     return .leaveChannel
   }
 
-  // 復帰時にチャンネル情報を返す。
   func channelDescriptor(restoredChannelUUID channelUUID: UUID) -> PTChannelDescriptor {
     return PTChannelDescriptor(name: module?.channelName ?? "MIRISE Intercom", image: nil)
   }
