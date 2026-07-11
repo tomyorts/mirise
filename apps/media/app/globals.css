@@ -481,6 +481,36 @@ strong { font-weight: 600; background: linear-gradient(transparent 68%, var(--ac
 .check-nudge .desc { margin: 0 auto 18px; font-size: 0.88rem; color: var(--ink-soft); max-width: 40em; }
 .check-nudge .cta-buttons { justify-content: center; }
 
+/* 工程フロー図(記事の図解) */
+.proc-flow {
+  margin: 1.9em 0; padding: 22px 24px; border: 1px solid var(--accent-line);
+  border-radius: 12px; background: linear-gradient(180deg, var(--accent-soft), transparent 70%);
+}
+.proc-flow-title {
+  font-family: var(--font-serif); font-weight: 600; font-size: 1rem; margin: 0 0 16px;
+  display: flex; align-items: center; gap: 8px;
+}
+.proc-flow-title::before { content: ""; width: 4px; height: 16px; background: var(--accent); border-radius: 2px; }
+.proc-steps { list-style: none; margin: 0; padding: 0; }
+.proc-step { position: relative; padding: 0 0 20px 46px; }
+.proc-step:last-child { padding-bottom: 0; }
+.proc-step::before {
+  content: ""; position: absolute; left: 15px; top: 6px; bottom: -2px; width: 2px; background: var(--accent-line);
+}
+.proc-step:last-child::before { display: none; }
+.proc-num {
+  position: absolute; left: 0; top: 0; width: 32px; height: 32px; border-radius: 50%;
+  background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 0.9rem; font-family: var(--font-gothic);
+}
+.proc-body { display: block; padding-top: 3px; }
+.proc-label { font-weight: 600; color: var(--ink); }
+.proc-note { display: block; font-size: 0.85rem; color: var(--ink-soft); margin-top: 2px; line-height: 1.6; }
+.proc-cap { font-size: 0.8rem; color: var(--ink-faint); margin: 14px 0 0; }
+.proc-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 1.9em 0; }
+.proc-compare .proc-flow { margin: 0; }
+@media (max-width: 640px) { .proc-compare { grid-template-columns: 1fr; } }
+
 /* 関連記事 */
 .related h2 {
   font-family: var(--font-serif); font-size: 1.2rem; margin: 2.6em 0 0.4em;

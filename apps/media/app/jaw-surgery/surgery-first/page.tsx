@@ -1,6 +1,7 @@
 import ArticleLayout from '@/components/ArticleLayout';
 import Link from 'next/link';
 import DisclosureBlock from '@/components/DisclosureBlock';
+import ProcessFlow from '@/components/ProcessFlow';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
 
@@ -24,6 +25,28 @@ export default function Page() {
       </p>
 
       <h2 id="hikaku">従来法との比較</h2>
+      <div className="proc-compare">
+        <ProcessFlow
+          title="従来法(オーソドックス)"
+          steps={[
+            { label: '術前矯正', note: '手術に向けて歯を並べる(おおむね1〜2年)' },
+            { label: '顎矯正手術', note: '骨格のずれを解消' },
+            { label: '術後矯正', note: '噛み合わせの仕上げ' },
+            { label: '保定', note: '後戻りを抑える' },
+          ]}
+        />
+        <ProcessFlow
+          title="サージェリーファースト"
+          steps={[
+            { label: '顎矯正手術', note: '術前矯正を省略・短縮し先に手術' },
+            { label: '術後矯正', note: '噛み合わせを仕上げる' },
+            { label: '保定', note: '後戻りを抑える' },
+          ]}
+        />
+      </div>
+      <p className="proc-cap" style={{ marginTop: 0 }}>
+        治療の順序の違いを示した図です。どちらが適するかは症例の診断により、期間や結果には個人差があります。
+      </p>
       <div className="table-wrap">
       <table>
         <thead>

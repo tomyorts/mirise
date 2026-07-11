@@ -1,6 +1,7 @@
 import ArticleLayout from '@/components/ArticleLayout';
 import Link from 'next/link';
 import DisclosureBlock from '@/components/DisclosureBlock';
+import ProcessFlow from '@/components/ProcessFlow';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
 
@@ -18,6 +19,17 @@ export default function Page() {
       <p>顎変形症と診断され、指定医療機関で手術を前提とした治療計画を立てる場合には、矯正治療と手術の両方に健康保険が適用されます。</p>
       <h2 id="zentai-timeline">治療全体のタイムライン：完了まで2年半〜4年が目安</h2>
       <p>外科矯正は、術前矯正、入院・手術、術後矯正、保定という4つの段階を順番に進みます。全体の期間は一般に2年半〜4年程度で、歯の動きやすさや手術の内容によって個人差があります。</p>
+      <ProcessFlow
+        title="外科矯正の全体の流れ"
+        steps={[
+          { label: '精密検査・診断', note: 'レントゲン・CT・歯型・顔貌の分析、治療計画の決定(1〜2ヶ月)' },
+          { label: '術前矯正', note: '手術後に噛み合う位置へ歯を並べる(1年〜1年半)' },
+          { label: '入院・手術', note: '全身麻酔で顎の骨を切り、移動して固定(入院1〜2週間)' },
+          { label: '術後矯正', note: '噛み合わせの最終調整(6ヶ月〜1年)' },
+          { label: '保定', note: '後戻りを抑えるリテーナーの使用(約2年)' },
+        ]}
+        caption="期間はいずれも一般的な目安で、症例により個人差があります。"
+      />
       <div className="table-wrap"><table><thead><tr><th>段階</th><th>おもな内容</th><th>期間の一般的な目安</th></tr></thead><tbody><tr><td>精密検査・診断</td><td>レントゲン・CT・歯型・顔貌の分析、治療計画の決定</td><td>1〜2ヶ月</td></tr><tr><td>術前矯正</td><td>手術後に噛み合う位置へ歯を並べる</td><td>1年〜1年半</td></tr><tr><td>入院・手術</td><td>全身麻酔で顎の骨を切り、移動して固定</td><td>入院1〜2週間</td></tr><tr><td>回復期(自宅療養)</td><td>顎間固定・食事制限・腫れの回復</td><td>2週間〜1ヶ月</td></tr><tr><td>術後矯正</td><td>噛み合わせの最終調整</td><td>6ヶ月〜1年</td></tr><tr><td>保定</td><td>後戻りを抑えるための装置(リテーナー)の使用</td><td>2年程度</td></tr></tbody></table></div>
       <p><strong>期間の大半を占めるのは手術そのものではなく、前後の矯正治療です。</strong>手術をすればすぐに終わる治療ではないという前提でスケジュールを組むことが、転職・結婚・受験といったライフイベントと治療を両立させる鍵になります。</p>
       <h2 id="jutsuzen-kyousei">術前矯正：手術後に噛み合う歯並びを先につくる</h2>
