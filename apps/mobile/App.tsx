@@ -1,6 +1,7 @@
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -321,7 +322,7 @@ export default function App() {
             <Text style={[styles.hint, { color: PttChannel ? "#0f8f4f" : "#c62030" }]}>
               PTTネイティブ: {PttChannel ? "有効（読み込み済み）" : "無効（未読み込み）"}
               {"\n"}RemotePtt: {RemotePtt ? "有効" : "無効"} / ビルドタグ:{" "}
-              {RemotePtt?.buildTag ?? "（旧ビルド）"}（診断用）
+              {RemotePtt?.buildTag ?? "（旧ビルド）"} / iOS {String(Platform.Version)}（診断用）
             </Text>
             <Text style={styles.hint}>
               画面OFF・ポケットの中でも話せるかの検証です。まず「PTTを有効化」→ 下の「話す」を
