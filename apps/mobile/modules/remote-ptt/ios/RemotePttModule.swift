@@ -15,6 +15,11 @@ public class RemotePttModule: Module {
     Name("RemotePtt")
     Events("onToggle")
 
+    // どのネイティブビルドが実機に入っているかを判別するためのタグ。
+    Constants([
+      "buildTag": "ptt-linkfix-1"
+    ])
+
     // 購読を開始する。
     Function("start") { [weak self] in
       guard let self = self, !self.started else { return }

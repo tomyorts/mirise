@@ -4,6 +4,8 @@ import { requireOptionalNativeModule, type EventSubscription } from "expo-module
 // Expo Go や未ビルド環境では存在しないため requireOptional で「無ければ null」にする
 // （import 時点でアプリごとクラッシュするのを防ぐ）。
 export type RemotePttModuleType = {
+  /** どのネイティブビルドが入っているかを判別するタグ */
+  buildTag?: string;
   /** リモートコマンド(イヤホンの再生/停止ボタン)の購読を開始 */
   start(): void;
   /** 購読を停止 */
