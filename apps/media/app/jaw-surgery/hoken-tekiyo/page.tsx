@@ -1,6 +1,7 @@
 import ArticleLayout from '@/components/ArticleLayout';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
+import { reviewValue } from '@/content/review';
 
 const meta = getArticle('jaw-surgery', 'hoken-tekiyo')!;
 
@@ -64,9 +65,8 @@ export default function Page() {
       <h2 id="hiyou">自己負担の目安と高額療養費制度</h2>
       <p>
         保険適用(3割負担)の場合、術前矯正・手術・入院・術後矯正を合わせた自己負担の総額は、おおむね
-        <strong>30〜60万円程度</strong>
-        が目安です(<span>要確認: 監修時に自院実績に基づく幅に修正</span>
-        )。手術と入院の費用は高額療養費制度の対象となるため、所得区分によっては手術月の自己負担がさらに軽減されます。
+        <strong>{reviewValue('hoken-tekiyo', 'hokenGaku')}</strong>
+        が目安です。手術と入院の費用は高額療養費制度の対象となるため、所得区分によっては手術月の自己負担がさらに軽減されます。
       </p>
       <p>
         自由診療で外科矯正に相当する治療を行った場合の総額(矯正費用+手術費用)と比べると、負担額には大きな差が生じます。骨格性の問題を指摘された方は、
@@ -81,10 +81,7 @@ export default function Page() {
         <li>連携する口腔外科(手術を行う病院)との治療計画のすり合わせ</li>
         <li>術前矯正(おおむね1〜2年)→ 入院・手術(1〜2週間程度)→ 術後矯正(おおむね半年〜1年)</li>
       </ol>
-      <p>
-        全体期間はおおむね2〜3年です。期間・入院日数は症例と術式により異なります(要確認:
-        監修時に自院プロトコルに合わせて確定)。
-      </p>
+      <p>{reviewValue('hoken-tekiyo', 'kikan')}</p>
     </ArticleLayout>
   );
 }
