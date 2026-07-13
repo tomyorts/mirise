@@ -3,6 +3,7 @@ import Link from 'next/link';
 import DisclosureBlock from '@/components/DisclosureBlock';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
+import { reviewValue } from '@/content/review';
 
 const meta = getArticle('treatment', 'wire-aligner')!;
 
@@ -43,7 +44,7 @@ export default function Page() {
 
       <DisclosureBlock
         treatmentName="ワイヤー矯正(マルチブラケット装置)およびマウスピース型矯正装置(アライナー)による歯列矯正"
-        cost="全体矯正の総額目安:ワイヤー矯正 ◯◯万円〜◯◯万円/マウスピース矯正 ◯◯万円〜◯◯万円(要確認: 監修時に確定)。検査・診断料、毎回の調整料、保定装置の費用が別途かかる場合があります。"
+        cost={reviewValue('wire-aligner', 'cost')}
         duration="歯を動かす動的治療が1年半〜3年程度、その後に保定期間が2年程度(症例により異なり、個人差があります)"
         insuranceNote="歯列矯正は原則として自由診療で、健康保険は適用されません。例外として、顎変形症と診断され指定医療機関で外科手術を前提に治療する場合や、国が定める先天疾患に起因するかみ合わせの異常では保険が適用されます。"
         risks={[

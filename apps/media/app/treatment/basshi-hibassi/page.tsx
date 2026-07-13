@@ -3,6 +3,7 @@ import Link from 'next/link';
 import DisclosureBlock from '@/components/DisclosureBlock';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
+import { reviewValue } from '@/content/review';
 
 const meta = getArticle('treatment', 'basshi-hibassi')!;
 
@@ -44,7 +45,7 @@ export default function Page() {
 
       <DisclosureBlock
         treatmentName="歯列矯正(ワイヤー矯正・マウスピース型矯正による全体矯正。抜歯・非抜歯いずれの治療計画も含む)"
-        cost="検査・診断料 ◯◯万円、装置・技術料 ◯◯万円〜◯◯万円、調整料 月◯◯円程度(要確認: 監修時に確定)"
+        cost={reviewValue('basshi-hibassi', 'cost')}
         duration="動的治療期間の目安は1年半〜3年、その後の保定期間は2年以上。抜歯を伴う場合はスペースを閉じる分、期間が長くなる傾向があります(個人差があります)"
         insuranceNote="一般的な歯列矯正は自由診療で、全額自己負担です。顎変形症と診断され、指定医療機関で外科手術を前提とした矯正治療を行う場合など、条件を満たすときに限り健康保険が適用されます。"
         risks={[

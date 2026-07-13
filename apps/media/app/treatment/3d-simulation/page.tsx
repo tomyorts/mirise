@@ -3,6 +3,7 @@ import Link from 'next/link';
 import DisclosureBlock from '@/components/DisclosureBlock';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
+import { reviewValue } from '@/content/review';
 
 const meta = getArticle('treatment', '3d-simulation')!;
 
@@ -46,7 +47,7 @@ export default function Page() {
 
       <DisclosureBlock
         treatmentName="3Dシミュレーションを用いた矯正歯科治療(マウスピース型矯正装置・ワイヤー矯正を含む)"
-        cost="精密検査・診断料(シミュレーション作成を含む):◯万円程度、矯正治療総額:◯◯万円〜◯◯万円(要確認: 監修時に確定)"
+        cost={reviewValue('3d-simulation', 'cost')}
         duration="動的治療期間はおおむね1〜3年、その後に1〜2年程度の保定期間が必要です(個人差があります)"
         insuranceNote="3Dシミュレーションを用いた一般的な矯正治療は自由診療であり、健康保険は適用されません。顎変形症と診断され、指定医療機関で外科手術を前提とした矯正治療を行う場合など、例外的に保険が適用されるケースがあります。"
         risks={[

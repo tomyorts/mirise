@@ -3,6 +3,7 @@ import Link from 'next/link';
 import DisclosureBlock from '@/components/DisclosureBlock';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
+import { reviewValue } from '@/content/review';
 
 const meta = getArticle('jaw-surgery', 'geka-risk')!;
 
@@ -44,7 +45,7 @@ export default function Page() {
 
       <DisclosureBlock
         treatmentName="外科的矯正治療(顎矯正手術を併用する矯正治療)"
-        cost="顎変形症の診断のもと、指定を受けた医療機関で手術を前提とした治療を行う場合は健康保険が適用され、自己負担3割で矯正治療と手術を合わせて総額◯◯万円程度が目安です(要確認: 監修時に確定)。高額療養費制度の対象になる場合があります。保険適用の条件を満たさない場合は全額自己負担となります。"
+        cost={reviewValue('geka-risk', 'cost')}
         duration="術前矯正に1〜2年程度、入院・手術に1〜2週間程度、術後矯正に6か月〜1年程度、その後に保定期間が続くのが一般的な目安です。期間には個人差があります。"
         insuranceNote="顎変形症と診断され、顎口腔機能診断施設の指定を受けた医療機関で、外科手術を治療計画に含む矯正治療を行う場合に健康保険が適用されます。マウスピース型装置単独の治療や、指定外の医療機関での治療は保険適用の対象外です。"
         risks={[

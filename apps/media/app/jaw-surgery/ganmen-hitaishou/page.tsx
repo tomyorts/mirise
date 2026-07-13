@@ -3,6 +3,7 @@ import Link from 'next/link';
 import DisclosureBlock from '@/components/DisclosureBlock';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
+import { reviewValue } from '@/content/review';
 
 const meta = getArticle('jaw-surgery', 'ganmen-hitaishou')!;
 
@@ -39,7 +40,7 @@ export default function Page() {
 
       <DisclosureBlock
         treatmentName="歯列矯正単独治療(顔面非対称に対するカモフラージュ矯正を含む自由診療の矯正歯科治療)"
-        cost="総額◯◯万円〜◯◯万円(要確認: 監修時に確定)。装置の種類や症例の難易度によって変動します。検査・診断料、通院ごとの調整料が別途かかる場合があります(要確認: 監修時に確定)。"
+        cost={reviewValue('ganmen-hitaishou', 'cost')}
         duration="動的治療期間の目安は2〜3年程度、その後の保定期間が1〜2年程度です(個人差があります)。"
         insuranceNote="歯列矯正単独の治療は原則として自由診療(保険適用外)です。顎変形症と診断され、指定医療機関で外科手術を前提とした矯正治療を行う場合に限り、健康保険が適用されます。"
         risks={[
