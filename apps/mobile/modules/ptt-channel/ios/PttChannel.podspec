@@ -5,7 +5,9 @@ Pod::Spec.new do |s|
   s.description    = 'Small Expo module wrapping the PushToTalk framework for pocket/background PTT.'
   s.author         = ''
   s.homepage       = 'https://github.com/tomyorts/mirise'
-  s.platforms      = { :ios => '16.0' }
+  # アプリ本体(15.1)と揃える。16.0にすると autolinking がモジュールを除外し、
+  # requireNativeModule が null になる。iOS16専用APIは @available で実行時保護済み。
+  s.platforms      = { :ios => '15.1' }
   s.source         = { git: '' }
   s.static_framework = true
 

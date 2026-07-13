@@ -17,7 +17,7 @@ public class RemotePttModule: Module {
 
     // どのネイティブビルドが実機に入っているかを判別するためのタグ。
     Constants([
-      "buildTag": "ptt-hardlink-2"
+      "buildTag": "ptt-plat-3"
     ])
 
     // 購読を開始する。
