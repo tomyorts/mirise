@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { AUTHORS } from '@/lib/authors';
 import { articlePath, CATEGORY_LABEL, type ArticleMeta } from '@/lib/articles';
 import { REVIEW_STATUS_LABEL, SITE } from '@/lib/site';
+import { hasReview, isReviewPublished } from '@/content/review';
 import Breadcrumbs from './Breadcrumbs';
 import Cta from './Cta';
 import JsonLd from './JsonLd';
@@ -20,7 +21,12 @@ export default function ArticleLayout({
 }) {
   const author = AUTHORS[meta.authorId];
   const reviewer = AUTHORS[meta.reviewerId];
-  const isDraft = meta.reviewStatus !== 'published';
+  // 公開判定: 公開管理ファイル(content/review.ts)に登録済みならそれを優先。
+  // 未登録の記事は従来どおり reviewStatus を見る。
+  const published = hasReview(meta.slug)
+    ? isReviewPublished(meta.slug)
+    : meta.reviewStatus === 'published';
+  const isDraft = !published;
 
   const jsonLd = {
     '@context': 'https://schema.org',

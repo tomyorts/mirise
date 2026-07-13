@@ -3,6 +3,7 @@ import Link from 'next/link';
 import DisclosureBlock from '@/components/DisclosureBlock';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
+import { reviewValue } from '@/content/review';
 
 const meta = getArticle('jaw-surgery', 'kaikou')!;
 
@@ -44,7 +45,7 @@ export default function Page() {
 
       <DisclosureBlock
         treatmentName="開咬に対する矯正歯科治療(ワイヤー矯正・マウスピース型矯正・MFT併用を含む)"
-        cost="全体矯正で総額◯◯万円〜◯◯万円程度。MFTや歯科矯正用アンカースクリューは別途費用となる場合があります(要確認: 監修時に確定)"
+        cost={reviewValue('kaikou', 'cost')}
         duration="動的治療に1年半〜3年程度、その後の保定に2年以上(個人差があります)"
         insuranceNote="開咬の矯正治療は原則として自由診療です。ただし顎変形症と診断され、指定された医療機関で外科手術を前提とした矯正治療を行う場合は健康保険が適用されます。マウスピース型装置単独の治療は保険適用の対象外です。"
         risks={[

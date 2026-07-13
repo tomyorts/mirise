@@ -57,3 +57,23 @@ OGP画像を`.png`にリネームしHTML参照も書き換える(Apache/WordPres
 
 記事の `reviewStatus` が `published` 以外の場合、ページ上部にドラフトバナーが表示される。
 監修・コンプラ完了ごとに `lib/articles.ts` のステータスを更新すること。
+
+## 記事の公開ワークフロー(数値の確定 → 公開)
+
+非エンジニアが安全に記事を公開できるよう、**`content/review.ts` の1ファイルだけ**で
+公開を管理する仕組みを導入。
+
+1. 先生が数値を確定([監修チェックリスト](../../docs/media/10_supervision_checklist.md))
+2. `content/review.ts` で、その記事の `values` の「◯◯」を確定額に置き換える
+3. 「◯◯」「要確認」が残っていない状態にして `publish: true` にする
+   → **その記事だけ**公開・検索対象になり、ドラフトバナーが消える(サイト全体のnoindexを上書き)
+4. `npm run build` → `out/` を WordPress の `/media/` へアップロード
+
+**安全装置(公開事故の防止)**:
+- `values` に「◯◯」が1つでも残っていると、`publish: true` でも公開扱いにならない
+  (draft・noindexのまま)
+- 本文側に未確定が残ったまま公開状態になった場合も、ビルド時に
+  `scripts/check-publish.mjs` がビルドを失敗させる
+
+現在 `content/review.ts` に登録済みの記事のみこの方式で公開可能(順次追加)。
+未登録の記事は従来どおり `lib/articles.ts` の `reviewStatus` で管理。
