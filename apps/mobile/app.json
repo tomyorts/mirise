@@ -15,7 +15,7 @@
       },
       "infoPlist": {
         "NSMicrophoneUsageDescription": "院内インカムで通話するためにマイクを使用します。",
-        "UIBackgroundModes": ["audio"]
+        "UIBackgroundModes": ["audio", "push-to-talk"]
       }
     },
     "android": {
