@@ -51,12 +51,27 @@ export default function App() {
   // トグル判定を最新値で行うための参照 + 自動OFFタイマー。
   const micOnRef = useRef(false);
   const autoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 二重接続防止(PTT送信開始とUI操作が重なった時など)。
-  const connectingRef = useRef(false);
+  // 進行中の接続を共有する(同時に呼ばれた側は同じ結果を待つ。押下の取りこぼし防止)。
+  const connectPromiseRef = useRef<Promise<boolean> | null>(null);
+  // PTT送信の意図(トークボタンを押している間true)。
+  // 再接続完了時に既に離されていたら送信しない=ホットマイク(切り忘れ)防止の要。
+  const txActiveRef = useRef(false);
+  // PTTのシステム音声セッションが有効か(didActivate/didDeactivate)。
+  const audioActiveRef = useRef(false);
+  // JSハートビート。iOSがアプリを休止するとinterval が止まるので、
+  // 大きな空白=休止明けと判定し、見かけ上「接続中」でも信用せず再接続する。
+  const lastAliveRef = useRef(Date.now());
 
   useEffect(() => {
     micOnRef.current = micOn;
   }, [micOn]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      lastAliveRef.current = Date.now();
+    }, 3000);
+    return () => clearInterval(id);
+  }, []);
 
   const clearAutoOff = useCallback(() => {
     if (autoOffRef.current) {
@@ -73,84 +88,91 @@ export default function App() {
       // noop
     }
     roomRef.current = null;
-    try {
-      await AudioSession.stopAudioSession();
-    } catch {
-      // noop
+    // PTT送信中はシステムが音声セッションを所有しているため、アプリ側から止めない
+    // (止めると、いままさに始まった送信の音声が壊れる)。
+    if (!txActiveRef.current) {
+      try {
+        await AudioSession.stopAudioSession();
+      } catch {
+        // noop
+      }
     }
     setConnected(false);
     setMicOn(false);
   }, [clearAutoOff]);
 
-  const connect = useCallback(async () => {
-    if (connectingRef.current) return;
-    connectingRef.current = true;
-    setError(null);
-    setConnecting(true);
-    try {
-      await cleanup();
+  const connect = useCallback((): Promise<boolean> => {
+    // 進行中の接続があれば同じ結果を待つ(PTT押下とUI操作が重なっても取りこぼさない)。
+    if (connectPromiseRef.current) return connectPromiseRef.current;
 
-      // バックグラウンド(ポケット/画面OFF)でも音声を維持するための設定。
-      // playAndRecord + voiceChat + Bluetooth許可。app.json の UIBackgroundModes:["audio"] と併用。
-      // configureAudio は接続前に呼ぶ必要がある。
-      // 古いビルドでAPIが無くても接続自体は続行できるよう try/catch で保護。
+    const attempt = (async (): Promise<boolean> => {
+      setError(null);
+      setConnecting(true);
       try {
-        await AudioSession.configureAudio({
-          // イヤホン非接続時は受話口(プライベート)へ。スピーカーで患者に聞こえるのを防ぐ。
-          ios: { defaultOutput: "earpiece" },
-        });
-        await AudioSession.setAppleAudioConfiguration({
-          audioCategory: "playAndRecord",
-          audioMode: "voiceChat",
-          audioCategoryOptions: ["allowBluetooth", "allowBluetoothA2DP"],
-        });
-      } catch (audioConfigError) {
-        console.warn("audio session config skipped", audioConfigError);
-      }
-      try {
-        await AudioSession.startAudioSession();
-      } catch (audioStartError) {
-        // PTT(システム)側が音声セッションを管理している間は失敗することがあるが続行してよい。
-        console.warn("audio session start skipped", audioStartError);
-      }
+        await cleanup();
 
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (INTERCOM_KEY) headers["x-intercom-key"] = INTERCOM_KEY;
-      const response = await fetch(TOKEN_ENDPOINT, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ identity: identity.trim() || "staff", room: roomId }),
-      });
-      const data = (await response.json()) as {
-        token?: string;
-        url?: string;
-        error?: string;
-      };
-      if (!response.ok || !data.token || !data.url) {
-        throw new Error(data.error ?? "トークン取得に失敗しました");
-      }
+        // バックグラウンド(ポケット/画面OFF)でも音声を維持するための設定。
+        // PTT送信中はシステムが音声セッション(playAndRecord)を有効化済みなので触らない。
+        if (!txActiveRef.current) {
+          try {
+            await AudioSession.configureAudio({
+              // イヤホン非接続時は受話口(プライベート)へ。スピーカーで患者に聞こえるのを防ぐ。
+              ios: { defaultOutput: "earpiece" },
+            });
+            await AudioSession.setAppleAudioConfiguration({
+              audioCategory: "playAndRecord",
+              audioMode: "voiceChat",
+              audioCategoryOptions: ["allowBluetooth", "allowBluetoothA2DP"],
+            });
+            await AudioSession.startAudioSession();
+          } catch (audioConfigError) {
+            console.warn("audio session setup skipped", audioConfigError);
+          }
+        }
 
-      const room = new Room();
-      roomRef.current = room;
-      room.on(RoomEvent.Disconnected, () => {
-        setConnected(false);
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (INTERCOM_KEY) headers["x-intercom-key"] = INTERCOM_KEY;
+        const response = await fetch(TOKEN_ENDPOINT, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ identity: identity.trim() || "staff", room: roomId }),
+        });
+        const data = (await response.json()) as {
+          token?: string;
+          url?: string;
+          error?: string;
+        };
+        if (!response.ok || !data.token || !data.url) {
+          throw new Error(data.error ?? "トークン取得に失敗しました");
+        }
+
+        const room = new Room();
+        roomRef.current = room;
+        room.on(RoomEvent.Disconnected, () => {
+          setConnected(false);
+          setMicOn(false);
+        });
+
+        await room.connect(data.url, data.token);
+        // PTT前提: 接続直後はマイクOFF(送信しない)。
+        await room.localParticipant.setMicrophoneEnabled(false);
+        setConnected(true);
         setMicOn(false);
-      });
+        lastAliveRef.current = Date.now();
+        return true;
+      } catch (e) {
+        await cleanup();
+        setError(e instanceof Error ? e.message : "接続に失敗しました");
+        return false;
+      } finally {
+        setConnecting(false);
+      }
+    })().finally(() => {
+      connectPromiseRef.current = null;
+    });
 
-      await room.connect(data.url, data.token);
-      // PTT前提: 接続直後はマイクOFF(送信しない)。
-      await room.localParticipant.setMicrophoneEnabled(false);
-      setConnected(true);
-      setMicOn(false);
-      return true;
-    } catch (e) {
-      await cleanup();
-      setError(e instanceof Error ? e.message : "接続に失敗しました");
-      return false;
-    } finally {
-      connectingRef.current = false;
-      setConnecting(false);
-    }
+    connectPromiseRef.current = attempt;
+    return attempt;
   }, [cleanup, identity, roomId]);
 
   const setMic = useCallback(
@@ -183,17 +205,46 @@ export default function App() {
   // 接続中だけイヤホンのハードボタンを購読する。
   useRemotePtt(toggleMic, connected);
 
+  // PTTのシステム音声セッションが有効になるのを少しだけ待つ(未有効のまま録音を始めない)。
+  const waitAudioActive = useCallback(async () => {
+    for (let i = 0; i < 14; i++) {
+      if (audioActiveRef.current) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }, []);
+
   // PTT送信開始: Appleの設計では「待機中はアプリ休止 → 話す瞬間に起こされる」。
   // 休止中にLiveKitが切断されていたら、まず高速再接続してから送信ONにする。
+  // 重要: 各段階で「まだ押されているか(txActiveRef)」を確認し、
+  // 離された後にマイクONが発動する事故(ホットマイク)を防ぐ。
   const pttTransmitStart = useCallback(async () => {
+    txActiveRef.current = true;
+
+    // JSが休止していた直後は、見かけ上「接続中」でも実際は切れていることがある。
+    // ハートビートの空白が大きければ接続を信用せず作り直す。
+    const suspectedStale = Date.now() - lastAliveRef.current > 8000;
     const room = roomRef.current;
-    if (room && room.state === ConnectionState.Connected) {
+
+    if (!suspectedStale && room && room.state === ConnectionState.Connected) {
+      await waitAudioActive();
+      if (!txActiveRef.current) return;
       await setMic(true);
+      if (!txActiveRef.current) await setMic(false);
       return;
     }
+
     const ok = await connect();
-    if (ok) await setMic(true);
-  }, [connect, setMic]);
+    if (!ok || !txActiveRef.current) return;
+    await waitAudioActive();
+    if (!txActiveRef.current) return;
+    await setMic(true);
+    if (!txActiveRef.current) await setMic(false);
+  }, [connect, setMic, waitAudioActive]);
+
+  const pttTransmitEnd = useCallback(async () => {
+    txActiveRef.current = false;
+    await setMic(false);
+  }, [setMic]);
 
   // Phase B: PushToTalkフレームワークのイベントを購読。
   // システム(ロック画面/Dynamic Island)からの送信開始/停止で LiveKit のマイクをON/OFF。
@@ -203,11 +254,17 @@ export default function App() {
       PttChannel.addListener("onJoin", () => setPttJoined(true)),
       PttChannel.addListener("onLeave", () => setPttJoined(false)),
       PttChannel.addListener("onBeginTransmitting", () => void pttTransmitStart()),
-      PttChannel.addListener("onEndTransmitting", () => void setMic(false)),
+      PttChannel.addListener("onEndTransmitting", () => void pttTransmitEnd()),
+      PttChannel.addListener("onActivateAudio", () => {
+        audioActiveRef.current = true;
+      }),
+      PttChannel.addListener("onDeactivateAudio", () => {
+        audioActiveRef.current = false;
+      }),
       PttChannel.addListener("onError", () => {}),
     ];
     return () => subs.forEach((s) => s?.remove());
-  }, [pttTransmitStart, setMic]);
+  }, [pttTransmitStart, pttTransmitEnd]);
 
   // PTTチャンネルに参加/退出。
   const joinPtt = useCallback(async () => {

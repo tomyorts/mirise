@@ -25,6 +25,16 @@ public class PttChannelModule: Module {
       "onError"
     )
 
+    // Appleの要件: PTChannelManager はアプリ起動時のできるだけ早い段階で作成する。
+    // これにより、アプリがシステムに起こされた時(チャンネル復帰・送信イベント)を取りこぼさない。
+    OnCreate {
+      if #available(iOS 16.0, *) {
+        Task { [weak self] in
+          _ = try? await self?.manager()
+        }
+      }
+    }
+
     AsyncFunction("join") { (name: String) async throws -> String in
       if #available(iOS 16.0, *) {
         return try await self.joinImpl(name)
@@ -109,6 +119,8 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
   }
 
   func channelManager(_ channelManager: PTChannelManager, didJoinChannel channelUUID: UUID, reason: PTChannelJoinReason) {
+    // 復帰(システムによる再参加)でもUUIDを保持し、以後の送信要求が機能するようにする。
+    module?.channelUUID = channelUUID
     module?.emit("onJoin", ["channelUUID": channelUUID.uuidString])
   }
 
@@ -142,6 +154,8 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
   }
 
   func channelDescriptor(restoredChannelUUID channelUUID: UUID) -> PTChannelDescriptor {
+    // 復帰時にUUIDも保持して、以後の送信要求(begin/end)が機能するようにする。
+    module?.channelUUID = channelUUID
     return PTChannelDescriptor(name: module?.channelName ?? "MIRISE Intercom", image: nil)
   }
 }
