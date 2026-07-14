@@ -11,7 +11,7 @@ import {
   View,
 } from "react-native";
 import { AudioSession, registerGlobals } from "@livekit/react-native";
-import { Room, RoomEvent } from "livekit-client";
+import { ConnectionState, Room, RoomEvent } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
 import PttChannel from "./modules/ptt-channel";
 import RemotePtt from "./modules/remote-ptt";
@@ -51,6 +51,8 @@ export default function App() {
   // トグル判定を最新値で行うための参照 + 自動OFFタイマー。
   const micOnRef = useRef(false);
   const autoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 二重接続防止(PTT送信開始とUI操作が重なった時など)。
+  const connectingRef = useRef(false);
 
   useEffect(() => {
     micOnRef.current = micOn;
@@ -81,6 +83,8 @@ export default function App() {
   }, [clearAutoOff]);
 
   const connect = useCallback(async () => {
+    if (connectingRef.current) return;
+    connectingRef.current = true;
     setError(null);
     setConnecting(true);
     try {
@@ -103,7 +107,12 @@ export default function App() {
       } catch (audioConfigError) {
         console.warn("audio session config skipped", audioConfigError);
       }
-      await AudioSession.startAudioSession();
+      try {
+        await AudioSession.startAudioSession();
+      } catch (audioStartError) {
+        // PTT(システム)側が音声セッションを管理している間は失敗することがあるが続行してよい。
+        console.warn("audio session start skipped", audioStartError);
+      }
 
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (INTERCOM_KEY) headers["x-intercom-key"] = INTERCOM_KEY;
@@ -133,10 +142,13 @@ export default function App() {
       await room.localParticipant.setMicrophoneEnabled(false);
       setConnected(true);
       setMicOn(false);
+      return true;
     } catch (e) {
       await cleanup();
       setError(e instanceof Error ? e.message : "接続に失敗しました");
+      return false;
     } finally {
+      connectingRef.current = false;
       setConnecting(false);
     }
   }, [cleanup, identity, roomId]);
@@ -171,19 +183,31 @@ export default function App() {
   // 接続中だけイヤホンのハードボタンを購読する。
   useRemotePtt(toggleMic, connected);
 
+  // PTT送信開始: Appleの設計では「待機中はアプリ休止 → 話す瞬間に起こされる」。
+  // 休止中にLiveKitが切断されていたら、まず高速再接続してから送信ONにする。
+  const pttTransmitStart = useCallback(async () => {
+    const room = roomRef.current;
+    if (room && room.state === ConnectionState.Connected) {
+      await setMic(true);
+      return;
+    }
+    const ok = await connect();
+    if (ok) await setMic(true);
+  }, [connect, setMic]);
+
   // Phase B: PushToTalkフレームワークのイベントを購読。
-  // システム(ロック画面/ポケット)からの送信開始/停止で LiveKit のマイクをON/OFF。
+  // システム(ロック画面/Dynamic Island)からの送信開始/停止で LiveKit のマイクをON/OFF。
   useEffect(() => {
     if (!PttChannel) return;
     const subs = [
       PttChannel.addListener("onJoin", () => setPttJoined(true)),
       PttChannel.addListener("onLeave", () => setPttJoined(false)),
-      PttChannel.addListener("onBeginTransmitting", () => void setMic(true)),
+      PttChannel.addListener("onBeginTransmitting", () => void pttTransmitStart()),
       PttChannel.addListener("onEndTransmitting", () => void setMic(false)),
       PttChannel.addListener("onError", () => {}),
     ];
     return () => subs.forEach((s) => s?.remove());
-  }, [setMic]);
+  }, [pttTransmitStart, setMic]);
 
   // PTTチャンネルに参加/退出。
   const joinPtt = useCallback(async () => {
@@ -325,8 +349,10 @@ export default function App() {
               {RemotePtt?.buildTag ?? "（旧ビルド）"} / iOS {String(Platform.Version)}（診断用）
             </Text>
             <Text style={styles.hint}>
-              画面OFF・ポケットの中でも話せるかの検証です。まず「PTTを有効化」→ 下の「話す」を
-              押しながら発声。動いたら、画面ロック中やロック画面のトーク表示からも試してください。
+              使い方: 「PTTを有効化」→ 画面ONのときは下の「話す」ボタン。
+              {"\n"}🔒 ロック中は、画面上部の【青いPTT表示（Dynamic Island）】をタップ →
+              システムの「トーク」ボタンを長押しで話せます。切断されていても自動で再接続します
+              （繋がるまで1〜3秒かかるので、押してひと呼吸おいてから話し始めてください）。
             </Text>
 
             {!pttJoined ? (
