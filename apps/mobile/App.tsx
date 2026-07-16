@@ -10,7 +10,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { AudioSession, registerGlobals } from "@livekit/react-native";
+import { AudioSession, registerGlobals, setupIOSAudioManagement } from "@livekit/react-native";
 import { ConnectionState, Room, RoomEvent } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
 import PttChannel from "./modules/ptt-channel";
@@ -20,7 +20,20 @@ import RemotePtt from "./modules/remote-ptt";
 const AUTO_OFF_MS = 30_000;
 
 // LiveKit(WebRTC)を使う前に一度だけグローバル初期化が必要。
-registerGlobals();
+// autoConfigureAudioSession(既定true)は、WebRTCの録音/再生ON・OFFに合わせて
+// LiveKitライブラリ自身がAVAudioSessionを自動で構成・有効化してくれる仕組み。
+// これに加えてアプリ側でも手動でAudioSession.startAudioSession()等を呼ぶと、
+// 同じセッションに対して二重に有効化が走り、PTT起動時など際どいタイミングで
+// "Session activation failed" を起こす原因になる。
+// そのため既定の自動管理はオフにし、setupIOSAudioManagement を自前で
+// (playAndRecord/voiceChat/Bluetooth許可を指定して)呼び直し、
+// 有効化・無効化のタイミングはライブラリのエンジン連動ロジックに一本化する。
+registerGlobals({ autoConfigureAudioSession: false });
+setupIOSAudioManagement(true, () => ({
+  audioCategory: "playAndRecord",
+  audioMode: "voiceChat",
+  audioCategoryOptions: ["allowBluetooth", "allowBluetoothA2DP"],
+}));
 
 // Web版と同じトークン発行APIを再利用する(Vercelに公開済み)。
 const TOKEN_ENDPOINT = "https://mirisevoicelink.vercel.app/api/token";
@@ -88,15 +101,9 @@ export default function App() {
       // noop
     }
     roomRef.current = null;
-    // PTT送信中はシステムが音声セッションを所有しているため、アプリ側から止めない
-    // (止めると、いままさに始まった送信の音声が壊れる)。
-    if (!txActiveRef.current) {
-      try {
-        await AudioSession.stopAudioSession();
-      } catch {
-        // noop
-      }
-    }
+    // 音声セッションの有効化/無効化は registerGlobals の自動管理(WebRTCの録音/再生
+    // ON・OFFに追従)に一本化しているため、ここでは手動で止めない
+    // (手動でも止めると二重制御になり、PTT起動時などに活性化が失敗する原因になる)。
     setConnected(false);
     setMicOn(false);
   }, [clearAutoOff]);
@@ -111,23 +118,12 @@ export default function App() {
       try {
         await cleanup();
 
-        // バックグラウンド(ポケット/画面OFF)でも音声を維持するための設定。
-        // PTT送信中はシステムが音声セッション(playAndRecord)を有効化済みなので触らない。
-        if (!txActiveRef.current) {
-          try {
-            await AudioSession.configureAudio({
-              // イヤホン非接続時は受話口(プライベート)へ。スピーカーで患者に聞こえるのを防ぐ。
-              ios: { defaultOutput: "earpiece" },
-            });
-            await AudioSession.setAppleAudioConfiguration({
-              audioCategory: "playAndRecord",
-              audioMode: "voiceChat",
-              audioCategoryOptions: ["allowBluetooth", "allowBluetoothA2DP"],
-            });
-            await AudioSession.startAudioSession();
-          } catch (audioConfigError) {
-            console.warn("audio session setup skipped", audioConfigError);
-          }
+        // イヤホン非接続時は受話口(プライベート)へ。スピーカーで患者に聞こえるのを防ぐ。
+        // これは有効化(activate)ではなく経路の好み設定のみなので、自動管理と競合しない。
+        try {
+          await AudioSession.configureAudio({ ios: { defaultOutput: "earpiece" } });
+        } catch (audioConfigError) {
+          console.warn("audio route config skipped", audioConfigError);
         }
 
         const headers: Record<string, string> = { "Content-Type": "application/json" };

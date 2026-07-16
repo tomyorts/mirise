@@ -1,6 +1,7 @@
 import ExpoModulesCore
 import PushToTalk
 import AVFoundation
+import UIKit
 
 // Apple の PushToTalk(PTChannelManager)を JS へ橋渡しするモジュール。
 // 重要: モジュールクラス自体には @available を付けない。付けると Expo の自動生成する
@@ -83,10 +84,19 @@ public class PttChannelModule: Module {
     let m = try await manager()
     let uuid = channelUUID ?? UUID()
     channelUUID = uuid
-    let descriptor = PTChannelDescriptor(name: name, image: nil)
+    let descriptor = PTChannelDescriptor(name: name, image: PttChannelModule.channelImage)
     try await m.requestJoinChannel(channelUUID: uuid, descriptor: descriptor)
     return uuid.uuidString
   }
+
+  // PTChannelDescriptor に渡すアイコン。nilのままだとシステムのPTT表示
+  // (Dynamic Island/ロック画面のトークUI)が正しく描画されない場合があるため、
+  // 確実に非nilになるSF Symbolを使う(専用アセットが無くても機能する)。
+  @available(iOS 16.0, *)
+  private static let channelImage: PTImage? = {
+    guard let uiImage = UIImage(systemName: "mic.circle.fill") else { return nil }
+    return PTImage(image: uiImage)
+  }()
 
   @available(iOS 16.0, *)
   private func leaveImpl() async throws {
@@ -156,6 +166,9 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
   func channelDescriptor(restoredChannelUUID channelUUID: UUID) -> PTChannelDescriptor {
     // 復帰時にUUIDも保持して、以後の送信要求(begin/end)が機能するようにする。
     module?.channelUUID = channelUUID
-    return PTChannelDescriptor(name: module?.channelName ?? "MIRISE Intercom", image: nil)
+    return PTChannelDescriptor(
+      name: module?.channelName ?? "MIRISE Intercom",
+      image: PttChannelModule.channelImage
+    )
   }
 }
