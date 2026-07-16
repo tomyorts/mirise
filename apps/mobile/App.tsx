@@ -160,6 +160,14 @@ export default function App() {
           setConnected(false);
           setMicOn(false);
         });
+        // サーバーが実際に計測した「自分の声の音量」。これが記録されれば、
+        // 音声が確実にサーバーまで届いている証拠になる(ローカルの状態だけでは分からない)。
+        room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+          const me = speakers.find((s) => s.sid === room.localParticipant.sid);
+          if (me) {
+            logDebug(`サーバー計測: 自分の音声を検出 level=${me.audioLevel.toFixed(3)}`);
+          }
+        });
 
         await room.connect(data.url, data.token);
         logDebug(`connect: room.connect完了(+${Date.now() - startedAt}ms)`);
