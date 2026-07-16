@@ -84,7 +84,7 @@ public class PttChannelModule: Module {
     let m = try await manager()
     let uuid = channelUUID ?? UUID()
     channelUUID = uuid
-    let descriptor = PTChannelDescriptor(name: name, image: PttChannelModule.channelImage)
+    let descriptor = PTChannelDescriptor(name: name, image: PttChannelModule.makeChannelImage())
     try await m.requestJoinChannel(channelUUID: uuid, descriptor: descriptor)
     return uuid.uuidString
   }
@@ -92,11 +92,14 @@ public class PttChannelModule: Module {
   // PTChannelDescriptor に渡すアイコン。nilのままだとシステムのPTT表示
   // (Dynamic Island/ロック画面のトークUI)が正しく描画されない場合があるため、
   // 確実に非nilになるSF Symbolを使う(専用アセットが無くても機能する)。
+  // static let にすると @available と stored property の組み合わせで
+  // コンパイラの型検査が壊れる(下の行に無関係な偽エラーが連鎖する)ため、
+  // 呼び出すたびに作る通常の関数にする。
   @available(iOS 16.0, *)
-  private static let channelImage: PTImage? = {
+  fileprivate static func makeChannelImage() -> PTImage? {
     guard let uiImage = UIImage(systemName: "mic.circle.fill") else { return nil }
     return PTImage(image: uiImage)
-  }()
+  }
 
   @available(iOS 16.0, *)
   private func leaveImpl() async throws {
@@ -168,7 +171,7 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
     module?.channelUUID = channelUUID
     return PTChannelDescriptor(
       name: module?.channelName ?? "MIRISE Intercom",
-      image: PttChannelModule.channelImage
+      image: PttChannelModule.makeChannelImage()
     )
   }
 }
