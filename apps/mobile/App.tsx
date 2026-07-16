@@ -11,6 +11,7 @@ import {
   View,
 } from "react-native";
 import { AudioSession, registerGlobals, setupIOSAudioManagement } from "@livekit/react-native";
+import { RTCAudioSession } from "@livekit/react-native-webrtc";
 import { ConnectionState, Room, RoomEvent } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
 import PttChannel from "./modules/ptt-channel";
@@ -339,6 +340,18 @@ export default function App() {
       }),
       PttChannel.addListener("onActivateAudio", () => {
         logDebug("PTTイベント: onActivateAudio");
+        // 重要: AVAudioSessionを実際に有効化しているのはApple PushToTalk
+        // フレームワーク(PTChannelManager)であり、WebRTC自身ではない。
+        // WebRTCの内部音声セッション(RTCAudioSession)はこれを知らないままだと
+        // 録音エンジン(オーディオユニット)を起動しないため、setMicrophoneEnabled
+        // が成功したように見えても実際には無音のままになる。CallKit連携と同じ
+        // 要領で、ここで明示的に「有効化された」と伝える必要がある。
+        try {
+          RTCAudioSession.audioSessionDidActivate();
+          logDebug("PTT: RTCAudioSession.audioSessionDidActivate完了");
+        } catch (e) {
+          logDebug(`PTT: audioSessionDidActivateエラー ${e instanceof Error ? e.message : String(e)}`);
+        }
         audioActiveRef.current = true;
         // 音声セッションの有効化がwaitAudioActiveの待ち時間より遅れて届いた場合の
         // 保険: まだ送信ボタンが押されたままなら、ここで改めてマイクを有効化する。
@@ -349,6 +362,12 @@ export default function App() {
       }),
       PttChannel.addListener("onDeactivateAudio", () => {
         logDebug("PTTイベント: onDeactivateAudio");
+        try {
+          RTCAudioSession.audioSessionDidDeactivate();
+          logDebug("PTT: RTCAudioSession.audioSessionDidDeactivate完了");
+        } catch (e) {
+          logDebug(`PTT: audioSessionDidDeactivateエラー ${e instanceof Error ? e.message : String(e)}`);
+        }
         audioActiveRef.current = false;
       }),
       PttChannel.addListener("onError", (payload) => {
