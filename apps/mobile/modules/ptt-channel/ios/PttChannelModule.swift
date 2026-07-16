@@ -92,13 +92,11 @@ public class PttChannelModule: Module {
   // PTChannelDescriptor に渡すアイコン。nilのままだとシステムのPTT表示
   // (Dynamic Island/ロック画面のトークUI)が正しく描画されない場合があるため、
   // 確実に非nilになるSF Symbolを使う(専用アセットが無くても機能する)。
-  // static let にすると @available と stored property の組み合わせで
-  // コンパイラの型検査が壊れる(下の行に無関係な偽エラーが連鎖する)ため、
-  // 呼び出すたびに作る通常の関数にする。
-  @available(iOS 16.0, *)
-  fileprivate static func makeChannelImage() -> PTImage? {
-    guard let uiImage = UIImage(systemName: "mic.circle.fill") else { return nil }
-    return PTImage(image: uiImage)
+  // 注意: PTChannelDescriptor の image は UIImage を直接受け取る(PTImageという
+  // 型は存在しない)。誤った型を書くと未解決の型としてコンパイラの型検査全体が
+  // 壊れ、無関係な下の行にまで偽のエラーが連鎖するので注意。
+  fileprivate static func makeChannelImage() -> UIImage? {
+    return UIImage(systemName: "mic.circle.fill")
   }
 
   @available(iOS 16.0, *)

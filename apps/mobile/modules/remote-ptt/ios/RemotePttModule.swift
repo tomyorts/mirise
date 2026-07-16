@@ -17,7 +17,7 @@ public class RemotePttModule: Module {
 
     // どのネイティブビルドが実機に入っているかを判別するためのタグ。
     Constants([
-      "buildTag": "ptt-fix-7"
+      "buildTag": "ptt-fix-8"
     ])
 
     // 購読を開始する。
