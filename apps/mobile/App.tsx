@@ -74,6 +74,13 @@ export default function App() {
   // JSハートビート。iOSがアプリを休止するとinterval が止まるので、
   // 大きな空白=休止明けと判定し、見かけ上「接続中」でも信用せず再接続する。
   const lastAliveRef = useRef(Date.now());
+  // ロック中/バックグラウンドのPTT送信経路を後から確認するための診断ログ。
+  // 画面が見えないタイミングの処理を、あとで(ロック解除後に)時系列で追える。
+  const [debugLog, setDebugLog] = useState<string[]>([]);
+  const logDebug = useCallback((msg: string) => {
+    const t = new Date().toTimeString().slice(0, 8);
+    setDebugLog((prev) => [...prev.slice(-24), `${t} ${msg}`]);
+  }, []);
 
   useEffect(() => {
     micOnRef.current = micOn;
@@ -113,10 +120,13 @@ export default function App() {
     if (connectPromiseRef.current) return connectPromiseRef.current;
 
     const attempt = (async (): Promise<boolean> => {
+      const startedAt = Date.now();
+      logDebug("connect: 開始");
       setError(null);
       setConnecting(true);
       try {
         await cleanup();
+        logDebug("connect: cleanup完了");
 
         // イヤホン非接続時は受話口(プライベート)へ。スピーカーで患者に聞こえるのを防ぐ。
         // これは有効化(activate)ではなく経路の好み設定のみなので、自動管理と競合しない。
@@ -141,15 +151,18 @@ export default function App() {
         if (!response.ok || !data.token || !data.url) {
           throw new Error(data.error ?? "トークン取得に失敗しました");
         }
+        logDebug(`connect: トークン取得OK(+${Date.now() - startedAt}ms)`);
 
         const room = new Room();
         roomRef.current = room;
         room.on(RoomEvent.Disconnected, () => {
+          logDebug("room: Disconnectedイベント");
           setConnected(false);
           setMicOn(false);
         });
 
         await room.connect(data.url, data.token);
+        logDebug(`connect: room.connect完了(+${Date.now() - startedAt}ms)`);
         // PTT前提: 接続直後はマイクOFF(送信しない)。
         await room.localParticipant.setMicrophoneEnabled(false);
         setConnected(true);
@@ -157,6 +170,7 @@ export default function App() {
         lastAliveRef.current = Date.now();
         return true;
       } catch (e) {
+        logDebug(`connect: エラー ${e instanceof Error ? e.message : String(e)}`);
         await cleanup();
         setError(e instanceof Error ? e.message : "接続に失敗しました");
         return false;
@@ -174,16 +188,21 @@ export default function App() {
   const setMic = useCallback(
     async (on: boolean) => {
       const room = roomRef.current;
-      if (!room) return;
+      if (!room) {
+        logDebug(`setMic(${on}): roomなしのため無視`);
+        return;
+      }
       try {
         await room.localParticipant.setMicrophoneEnabled(on);
         setMicOn(on);
+        logDebug(`setMic(${on}): 完了`);
         if (!on) clearAutoOff();
       } catch (e) {
+        logDebug(`setMic(${on}): エラー ${e instanceof Error ? e.message : String(e)}`);
         setError(e instanceof Error ? e.message : "マイク操作に失敗しました");
       }
     },
-    [clearAutoOff],
+    [clearAutoOff, logDebug],
   );
 
   // タップ/ハードボタン用トグル: ONにしたら AUTO_OFF_MS で自動OFF。
@@ -218,49 +237,90 @@ export default function App() {
 
     // JSが休止していた直後は、見かけ上「接続中」でも実際は切れていることがある。
     // ハートビートの空白が大きければ接続を信用せず作り直す。
-    const suspectedStale = Date.now() - lastAliveRef.current > 8000;
+    const staleMs = Date.now() - lastAliveRef.current;
+    const suspectedStale = staleMs > 8000;
     const room = roomRef.current;
+    logDebug(
+      `PTT開始要求: stale=${staleMs}ms room.state=${room?.state ?? "なし"} suspectedStale=${suspectedStale}`,
+    );
 
     if (!suspectedStale && room && room.state === ConnectionState.Connected) {
+      logDebug("PTT: 高速経路(再接続なし)");
       await waitAudioActive();
-      if (!txActiveRef.current) return;
+      logDebug(`PTT: audioActive待ち完了(activated=${audioActiveRef.current})`);
+      if (!txActiveRef.current) {
+        logDebug("PTT: audioActive待ち中に離された");
+        return;
+      }
       await setMic(true);
-      if (!txActiveRef.current) await setMic(false);
+      if (!txActiveRef.current) {
+        logDebug("PTT: setMic中に離されたため再OFF");
+        await setMic(false);
+      }
       return;
     }
 
+    logDebug("PTT: 再接続経路");
     const ok = await connect();
-    if (!ok || !txActiveRef.current) return;
+    logDebug(`PTT: connect結果=${ok}`);
+    if (!ok || !txActiveRef.current) {
+      logDebug(`PTT: 中断(ok=${ok} txActive=${txActiveRef.current})`);
+      return;
+    }
     await waitAudioActive();
-    if (!txActiveRef.current) return;
+    logDebug(`PTT: audioActive待ち完了(activated=${audioActiveRef.current})`);
+    if (!txActiveRef.current) {
+      logDebug("PTT: audioActive待ち中に離された");
+      return;
+    }
     await setMic(true);
-    if (!txActiveRef.current) await setMic(false);
-  }, [connect, setMic, waitAudioActive]);
+    if (!txActiveRef.current) {
+      logDebug("PTT: setMic中に離されたため再OFF");
+      await setMic(false);
+    }
+  }, [connect, logDebug, setMic, waitAudioActive]);
 
   const pttTransmitEnd = useCallback(async () => {
+    logDebug("PTT: 終了要求");
     txActiveRef.current = false;
     await setMic(false);
-  }, [setMic]);
+  }, [logDebug, setMic]);
 
   // Phase B: PushToTalkフレームワークのイベントを購読。
   // システム(ロック画面/Dynamic Island)からの送信開始/停止で LiveKit のマイクをON/OFF。
   useEffect(() => {
     if (!PttChannel) return;
     const subs = [
-      PttChannel.addListener("onJoin", () => setPttJoined(true)),
-      PttChannel.addListener("onLeave", () => setPttJoined(false)),
-      PttChannel.addListener("onBeginTransmitting", () => void pttTransmitStart()),
-      PttChannel.addListener("onEndTransmitting", () => void pttTransmitEnd()),
+      PttChannel.addListener("onJoin", () => {
+        logDebug("PTTイベント: onJoin");
+        setPttJoined(true);
+      }),
+      PttChannel.addListener("onLeave", () => {
+        logDebug("PTTイベント: onLeave");
+        setPttJoined(false);
+      }),
+      PttChannel.addListener("onBeginTransmitting", () => {
+        logDebug("PTTイベント: onBeginTransmitting");
+        void pttTransmitStart();
+      }),
+      PttChannel.addListener("onEndTransmitting", () => {
+        logDebug("PTTイベント: onEndTransmitting");
+        void pttTransmitEnd();
+      }),
       PttChannel.addListener("onActivateAudio", () => {
+        logDebug("PTTイベント: onActivateAudio");
         audioActiveRef.current = true;
       }),
       PttChannel.addListener("onDeactivateAudio", () => {
+        logDebug("PTTイベント: onDeactivateAudio");
         audioActiveRef.current = false;
       }),
-      PttChannel.addListener("onError", () => {}),
+      PttChannel.addListener("onError", (payload) => {
+        logDebug(`PTTイベント: onError ${JSON.stringify(payload)}`);
+      }),
     ];
     return () => subs.forEach((s) => s?.remove());
-  }, [pttTransmitStart, pttTransmitEnd]);
+  }, [logDebug, pttTransmitStart, pttTransmitEnd]);
 
   // PTTチャンネルに参加/退出。
   const joinPtt = useCallback(async () => {
@@ -432,6 +492,21 @@ export default function App() {
                 </Pressable>
               </>
             )}
+
+            <Text style={[styles.cardLabel, { marginTop: 16 }]}>
+              🪵 診断ログ（ロック中の動作確認用・新しい順）
+            </Text>
+            <View style={styles.debugLogBox}>
+              {debugLog.length === 0 ? (
+                <Text style={styles.debugLogLine}>（まだログがありません）</Text>
+              ) : (
+                [...debugLog].reverse().map((line, i) => (
+                  <Text key={i} style={styles.debugLogLine}>
+                    {line}
+                  </Text>
+                ))
+              )}
+            </View>
           </View>
         ) : null}
 
@@ -448,6 +523,18 @@ export default function App() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#f5f7fb" },
   container: { padding: 20, paddingTop: 36 },
+  debugLogBox: {
+    backgroundColor: "#10182b",
+    borderRadius: 10,
+    padding: 10,
+    maxHeight: 220,
+  },
+  debugLogLine: {
+    color: "#8fe3a0",
+    fontSize: 11,
+    fontFamily: "Menlo",
+    marginBottom: 2,
+  },
   brand: {
     fontSize: 12,
     letterSpacing: 1.5,
