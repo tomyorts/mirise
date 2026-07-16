@@ -11,7 +11,7 @@ import {
   View,
 } from "react-native";
 import { AudioSession, registerGlobals } from "@livekit/react-native";
-import { RTCAudioSession, audioDeviceModuleEvents } from "@livekit/react-native-webrtc";
+import { audioDeviceModuleEvents } from "@livekit/react-native-webrtc";
 import { ConnectionState, Room, RoomEvent } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
 import PttChannel from "./modules/ptt-channel";
@@ -391,50 +391,22 @@ export default function App() {
         void pttTransmitEnd();
       }),
       PttChannel.addListener("onActivateAudio", () => {
-        logDebug("PTTイベント: onActivateAudio");
         // 重要: AVAudioSessionを実際に有効化しているのはApple PushToTalk
         // フレームワーク(PTChannelManager)であり、WebRTC自身ではない。
-        // WebRTCの内部音声セッション(RTCAudioSession)はこれを知らないままだと
-        // 録音エンジン(オーディオユニット)を起動しないため、setMicrophoneEnabled
-        // が成功したように見えても実際には無音のままになる。CallKit連携と同じ
-        // 要領で、ここで明示的に「有効化された」と伝える必要がある。
-        try {
-          RTCAudioSession.audioSessionDidActivate();
-          logDebug("PTT: RTCAudioSession.audioSessionDidActivate完了");
-        } catch (e) {
-          logDebug(`PTT: audioSessionDidActivateエラー ${e instanceof Error ? e.message : String(e)}`);
-        }
+        // 録音エンジン(オーディオユニット)を確実に起動させる処理
+        // (RTCAudioSession.isAudioEnabled)はネイティブ側(PttChannelModule.swift
+        // のdidActivate)で同期的に行うようにした。JS側からの
+        // audioSessionDidActivate呼び出しは非同期でタイミングが遅れうる上、
+        // 二重に有効化状態を操作すると不整合の原因になるため、ここでは
+        // 状態フラグの更新とマイクON待ちの解除のみを行う。
+        logDebug("PTTイベント: onActivateAudio");
         audioActiveRef.current = true;
-        void (async () => {
-          // 診断ログで判明: 接続直後のウォームアップでAudioEngineのハンドラは
-          // 一度だけ発火し、それ以降(実際のPTT送信時)は録音のON/OFFだけでは
-          // 二度と発火しない(playoutが有効なままのため、エンジンの完全な
-          // 有効化/無効化の境界を跨がない)。そのため、ロック中にOSがエンジンを
-          // 休止させていても誰も再始動させないまま「成功」してしまう。
-          // ここでPTTの有効化タイミングに合わせて明示的に再始動させる。
-          try {
-            logDebug("PTT: startAudioSession(強制再始動)開始");
-            await AudioSession.startAudioSession();
-            logDebug("PTT: startAudioSession(強制再始動)完了");
-          } catch (e) {
-            logDebug(`PTT: startAudioSession(強制再始動)エラー ${e instanceof Error ? e.message : String(e)}`);
-          }
-          // 音声セッションの有効化がwaitAudioActiveの待ち時間より遅れて届いた場合の
-          // 保険: まだ送信ボタンが押されたままなら、ここで改めてマイクを有効化する。
-          // (setMicrophoneEnabled(true)は既に有効な場合は無害な無処理になる)
-          if (txActiveRef.current) {
-            void setMic(true);
-          }
-        })();
+        if (txActiveRef.current) {
+          void setMic(true);
+        }
       }),
       PttChannel.addListener("onDeactivateAudio", () => {
         logDebug("PTTイベント: onDeactivateAudio");
-        try {
-          RTCAudioSession.audioSessionDidDeactivate();
-          logDebug("PTT: RTCAudioSession.audioSessionDidDeactivate完了");
-        } catch (e) {
-          logDebug(`PTT: audioSessionDidDeactivateエラー ${e instanceof Error ? e.message : String(e)}`);
-        }
         audioActiveRef.current = false;
       }),
       PttChannel.addListener("onError", (payload) => {

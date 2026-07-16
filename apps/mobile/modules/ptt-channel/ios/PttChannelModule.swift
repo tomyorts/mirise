@@ -2,6 +2,7 @@ import ExpoModulesCore
 import PushToTalk
 import AVFoundation
 import UIKit
+import WebRTC
 
 // Apple の PushToTalk(PTChannelManager)を JS へ橋渡しするモジュール。
 // 重要: モジュールクラス自体には @available を付けない。付けると Expo の自動生成する
@@ -167,10 +168,26 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
   }
 
   func channelManager(_ channelManager: PTChannelManager, didActivate audioSession: AVAudioSession) {
+    // 核心の修正: AVAudioSessionを実際に有効化しているのはPushToTalk
+    // フレームワーク自身であり、WebRTCではない。WebRTCのRTCAudioSessionに
+    // audioSessionDidActivateを伝えるだけでは、録音エンジン(オーディオユニット)
+    // 自体は起動しないことが実機検証で判明した(CallKit連携と同様、
+    // isAudioEnabledを明示的にtrueにする必要がある)。
+    // useManualAudioはこの一時的な区間だけON(PT送信中は手動制御)にし、
+    // 終わったらOFFに戻すことで、「押して話す」ボタン側の自動制御
+    // (setWillEnableEngineHandler等)には影響させない。
+    let rtcSession = RTCAudioSession.sharedInstance()
+    rtcSession.useManualAudio = true
+    rtcSession.audioSessionDidActivate(audioSession)
+    rtcSession.isAudioEnabled = true
     module?.emit("onActivateAudio")
   }
 
   func channelManager(_ channelManager: PTChannelManager, didDeactivate audioSession: AVAudioSession) {
+    let rtcSession = RTCAudioSession.sharedInstance()
+    rtcSession.isAudioEnabled = false
+    rtcSession.audioSessionDidDeactivate(audioSession)
+    rtcSession.useManualAudio = false
     module?.emit("onDeactivateAudio")
   }
 

@@ -12,6 +12,9 @@ Pod::Spec.new do |s|
   s.static_framework = true
 
   s.dependency 'ExpoModulesCore'
+  # RTCAudioSession(isAudioEnabled)を直接叩いて、PT起動時に録音エンジンを
+  # 確実に有効化するために必要(WebRTC本体のフレームワーク)。
+  s.dependency 'WebRTC-SDK'
 
   # PushToTalk(iOS16+)を強制リンクする。弱リンクではモジュールが実行時に読み込めず
   # requireNativeModule が null を返していたため、OTHER_LDFLAGS で確実にリンクする。
