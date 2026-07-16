@@ -8,8 +8,9 @@ import UIKit
 // モジュール一覧から除外され、requireNativeModule で見つからなくなる(=登録されない)。
 // iOS16専用APIは実行時に #available で保護し、値は Any でボックス化して保持する。
 public class PttChannelModule: Module {
-  fileprivate var managerBox: Any?   // PTChannelManager (iOS16+)
-  fileprivate var delegateBox: Any?  // PttDelegate (iOS16+)
+  fileprivate var managerBox: Any?      // PTChannelManager (iOS16+)
+  fileprivate var managerTaskBox: Any?  // Task<PTChannelManager, Error> (iOS16+, 作成中の共有)
+  fileprivate var delegateBox: Any?     // PttDelegate (iOS16+)
   fileprivate var channelUUID: UUID?
   fileprivate var channelName: String = "MIRISE Intercom"
 
@@ -65,17 +66,35 @@ public class PttChannelModule: Module {
 
   // MARK: - iOS16専用の実装(実行時ガード後にのみ呼ばれる)
 
+  // OnCreateでの先行作成と、join()呼び出しでの作成が同時に走ると
+  // PTChannelManager.channelManager(...)が二重に呼ばれてハングする恐れがあるため、
+  // 進行中のTaskを共有して二重作成を防ぐ(JS側のconnectPromiseRefと同じ考え方)。
   @available(iOS 16.0, *)
   private func manager() async throws -> PTChannelManager {
     if let existing = managerBox as? PTChannelManager { return existing }
-    let delegate = PttDelegate(module: self)
-    delegateBox = delegate
-    let created = try await PTChannelManager.channelManager(
-      delegate: delegate,
-      restorationDelegate: delegate
-    )
-    managerBox = created
-    return created
+    if let existingTask = managerTaskBox as? Task<PTChannelManager, Error> {
+      return try await existingTask.value
+    }
+
+    let task = Task<PTChannelManager, Error> { [weak self] in
+      guard let self else {
+        throw NSError(
+          domain: "PttChannel", code: 2,
+          userInfo: [NSLocalizedDescriptionKey: "モジュールが解放されました"]
+        )
+      }
+      let delegate = PttDelegate(module: self)
+      self.delegateBox = delegate
+      let created = try await PTChannelManager.channelManager(
+        delegate: delegate,
+        restorationDelegate: delegate
+      )
+      self.managerBox = created
+      return created
+    }
+    managerTaskBox = task
+    defer { managerTaskBox = nil }
+    return try await task.value
   }
 
   @available(iOS 16.0, *)

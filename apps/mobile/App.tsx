@@ -338,13 +338,20 @@ export default function App() {
     }
     setPttBusy(true);
     try {
+      logDebug("PTT参加: リクエスト開始");
       await PttChannel.join("MIRISE Intercom");
+      // JSだけリロードされた直後などは、ネイティブ側は既に参加済みで
+      // didJoinChannel(onJoinイベント)が再度発火しないことがある。
+      // join()のリクエスト自体が成功した時点で画面も確実に更新する。
+      logDebug("PTT参加: リクエスト成功(画面を更新)");
+      setPttJoined(true);
     } catch (e) {
+      logDebug(`PTT参加: エラー ${e instanceof Error ? e.message : String(e)}`);
       setError(e instanceof Error ? e.message : "PTT参加に失敗しました");
     } finally {
       setPttBusy(false);
     }
-  }, []);
+  }, [logDebug]);
 
   const leavePtt = useCallback(async () => {
     if (!PttChannel) return;
