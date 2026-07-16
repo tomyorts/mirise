@@ -1,12 +1,14 @@
 import ExpoModulesCore
-import MediaPlayer
 import GameController
 
-// 物理ボタンで送信ON/OFF(トグル)を実現するモジュール。2系統のボタンに対応:
-//   1. Bluetoothイヤホンの再生/停止ボタン (MPRemoteCommandCenter)
-//   2. キーを送るBLEリモコン=ページめくり器/指輪型など (GameController のキーボード入力)
-// どちらのボタンが押されても JS 側へ onToggle イベントを送る。
-// 2は通話中の音声モードに影響されにくく、より確実に拾える。
+// 物理ボタン(BLEリモコン=ページめくり器/シャッター/指輪型など、キーボードとして
+// キーを送るタイプ)で送信ON/OFF(トグル)するモジュール。押下で JS へ onToggle を送る。
+//
+// 注意: 以前はイヤホンの再生/停止ボタン(MPRemoteCommandCenter + NowPlaying)にも
+// 対応していたが削除した。NowPlaying情報を登録するとiOSがこのアプリを「音楽再生中」
+// として扱い、ロック画面がメディアウィジェットに占領されて Apple PushToTalk の
+// システムUI(ロック解除なしのトークボタン)が出なくなるため。イヤホンのメディア
+// ボタンは通話中(HFP)はどのみち届かないことも実機で確認済み。
 public class RemotePttModule: Module {
   private var started = false
   private var keyboardConnectObserver: NSObjectProtocol?
@@ -17,14 +19,13 @@ public class RemotePttModule: Module {
 
     // どのネイティブビルドが実機に入っているかを判別するためのタグ。
     Constants([
-      "buildTag": "ptt-fix-8"
+      "buildTag": "ptt-fix-9"
     ])
 
     // 購読を開始する。
     Function("start") { [weak self] in
       guard let self = self, !self.started else { return }
       self.started = true
-      self.startRemoteCommands()
       self.startKeyboard()
     }
 
@@ -32,44 +33,11 @@ public class RemotePttModule: Module {
     Function("stop") { [weak self] in
       guard let self = self, self.started else { return }
       self.started = false
-      self.stopRemoteCommands()
       self.stopKeyboard()
     }
   }
 
-  // MARK: - 1. イヤホンの再生/停止ボタン (MPRemoteCommandCenter)
-
-  private func startRemoteCommands() {
-    // Now Playing 情報が無いとボタンイベントが届かないため、最小の情報をセット。
-    MPNowPlayingInfoCenter.default().nowPlayingInfo = [
-      MPMediaItemPropertyTitle: "MIRISE Intercom",
-      MPNowPlayingInfoPropertyPlaybackRate: 1.0,
-    ]
-
-    let center = MPRemoteCommandCenter.shared()
-    let handler: (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { [weak self] _ in
-      self?.sendEvent("onToggle", [:])
-      return .success
-    }
-
-    // 機種によって送られてくるコマンドが異なるため、代表的なものをまとめて購読。
-    center.togglePlayPauseCommand.isEnabled = true
-    center.togglePlayPauseCommand.addTarget(handler: handler)
-    center.playCommand.isEnabled = true
-    center.playCommand.addTarget(handler: handler)
-    center.pauseCommand.isEnabled = true
-    center.pauseCommand.addTarget(handler: handler)
-  }
-
-  private func stopRemoteCommands() {
-    let center = MPRemoteCommandCenter.shared()
-    center.togglePlayPauseCommand.removeTarget(nil)
-    center.playCommand.removeTarget(nil)
-    center.pauseCommand.removeTarget(nil)
-    MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-  }
-
-  // MARK: - 2. キーを送るBLEリモコン (GameController キーボード入力)
+  // MARK: - キーを送るBLEリモコン (GameController キーボード入力)
 
   private func startKeyboard() {
     // すでに接続済みのキーボード(=BLEリモコン)にハンドラを付ける。
