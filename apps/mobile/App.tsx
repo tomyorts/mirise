@@ -171,8 +171,16 @@ export default function App() {
 
         await room.connect(data.url, data.token);
         logDebug(`connect: room.connect完了(+${Date.now() - startedAt}ms)`);
-        // PTT前提: 接続直後はマイクOFF(送信しない)。
+        // マイクエンジンの「ウォームアップ」: setMicrophoneEnabledは初回のみ
+        // createTracks()+publishTrack()という重い処理を行い、2回目以降は
+        // track.mute()/unmute()という軽い処理になる(ライブラリの内部実装)。
+        // 画面が確実に前面にあるこのタイミングで一度ON→OFFし、重い初回処理を
+        // 済ませておく。これにより、ロック中のPTT操作は毎回軽いmute切替だけで
+        // 済むようになり、ロック中に初回の重い処理が走って失敗するのを防ぐ。
+        logDebug("connect: マイクウォームアップ開始");
+        await room.localParticipant.setMicrophoneEnabled(true);
         await room.localParticipant.setMicrophoneEnabled(false);
+        logDebug("connect: マイクウォームアップ完了");
         setConnected(true);
         setMicOn(false);
         lastAliveRef.current = Date.now();
