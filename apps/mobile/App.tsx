@@ -236,12 +236,18 @@ export default function App() {
   // 接続中だけイヤホンのハードボタンを購読する。
   useRemotePtt(toggleMic, connected);
 
-  // PTTのシステム音声セッションが有効になるのを少しだけ待つ(未有効のまま録音を始めない)。
+  // PTTのシステム音声セッション(AVAudioSession)が実際に有効になるまで待つ。
+  // 実機ログで、待ち時間が700msだと間に合わず(onActivateAudioが1秒以上後に
+  // 発火)、activated=falseのままsetMic(true)してしまうケースを確認した。
+  // その場合、iOS側の録音エンジンがまだ起動していない状態でLiveKitがミュート
+  // 解除するため、APIレベルでは成功に見えてもサーバーには音声が届かない。
+  // 最大3秒まで待ち、戻り値で成否を呼び出し元に伝える。
   const waitAudioActive = useCallback(async () => {
-    for (let i = 0; i < 14; i++) {
-      if (audioActiveRef.current) return;
+    for (let i = 0; i < 60; i++) {
+      if (audioActiveRef.current) return true;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    return false;
   }, []);
 
   // PTT送信開始: Appleの設計では「待機中はアプリ休止 → 話す瞬間に起こされる」。
@@ -262,10 +268,14 @@ export default function App() {
 
     if (!suspectedStale && room && room.state === ConnectionState.Connected) {
       logDebug("PTT: 高速経路(再接続なし)");
-      await waitAudioActive();
-      logDebug(`PTT: audioActive待ち完了(activated=${audioActiveRef.current})`);
+      const activated = await waitAudioActive();
+      logDebug(`PTT: audioActive待ち完了(activated=${activated})`);
       if (!txActiveRef.current) {
         logDebug("PTT: audioActive待ち中に離された");
+        return;
+      }
+      if (!activated) {
+        logDebug("PTT: 音声セッション未有効のため送信を中断(録音できない状態)");
         return;
       }
       await setMic(true);
@@ -283,10 +293,14 @@ export default function App() {
       logDebug(`PTT: 中断(ok=${ok} txActive=${txActiveRef.current})`);
       return;
     }
-    await waitAudioActive();
-    logDebug(`PTT: audioActive待ち完了(activated=${audioActiveRef.current})`);
+    const activated = await waitAudioActive();
+    logDebug(`PTT: audioActive待ち完了(activated=${activated})`);
     if (!txActiveRef.current) {
       logDebug("PTT: audioActive待ち中に離された");
+      return;
+    }
+    if (!activated) {
+      logDebug("PTT: 音声セッション未有効のため送信を中断(録音できない状態)");
       return;
     }
     await setMic(true);
@@ -326,6 +340,12 @@ export default function App() {
       PttChannel.addListener("onActivateAudio", () => {
         logDebug("PTTイベント: onActivateAudio");
         audioActiveRef.current = true;
+        // 音声セッションの有効化がwaitAudioActiveの待ち時間より遅れて届いた場合の
+        // 保険: まだ送信ボタンが押されたままなら、ここで改めてマイクを有効化する。
+        // (setMicrophoneEnabled(true)は既に有効な場合は無害な無処理になる)
+        if (txActiveRef.current) {
+          void setMic(true);
+        }
       }),
       PttChannel.addListener("onDeactivateAudio", () => {
         logDebug("PTTイベント: onDeactivateAudio");
@@ -336,7 +356,7 @@ export default function App() {
       }),
     ];
     return () => subs.forEach((s) => s?.remove());
-  }, [logDebug, pttTransmitStart, pttTransmitEnd]);
+  }, [logDebug, pttTransmitStart, pttTransmitEnd, setMic]);
 
   // PTTチャンネルに参加/退出。
   const joinPtt = useCallback(async () => {
