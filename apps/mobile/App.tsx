@@ -10,8 +10,8 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { AudioSession, registerGlobals, setupIOSAudioManagement } from "@livekit/react-native";
-import { RTCAudioSession } from "@livekit/react-native-webrtc";
+import { AudioSession, registerGlobals } from "@livekit/react-native";
+import { RTCAudioSession, audioDeviceModuleEvents } from "@livekit/react-native-webrtc";
 import { ConnectionState, Room, RoomEvent } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
 import PttChannel from "./modules/ptt-channel";
@@ -26,15 +26,12 @@ const AUTO_OFF_MS = 30_000;
 // これに加えてアプリ側でも手動でAudioSession.startAudioSession()等を呼ぶと、
 // 同じセッションに対して二重に有効化が走り、PTT起動時など際どいタイミングで
 // "Session activation failed" を起こす原因になる。
-// そのため既定の自動管理はオフにし、setupIOSAudioManagement を自前で
-// (playAndRecord/voiceChat/Bluetooth許可を指定して)呼び直し、
-// 有効化・無効化のタイミングはライブラリのエンジン連動ロジックに一本化する。
+// そのため既定の自動管理はオフにし、下のApp内useEffectで自前の
+// エンジン連動ロジック(setupIOSAudioManagement相当)を登録する。
+// (自前実装にした理由: ロック中はXcodeコンソールが見えず、ライブラリ内部の
+// 動作がブラックボックスだったため。logDebugで各段階を画面に出すために
+// ライブラリの実装を展開している)
 registerGlobals({ autoConfigureAudioSession: false });
-setupIOSAudioManagement(true, () => ({
-  audioCategory: "playAndRecord",
-  audioMode: "voiceChat",
-  audioCategoryOptions: ["allowBluetooth", "allowBluetoothA2DP"],
-}));
 
 // Web版と同じトークン発行APIを再利用する(Vercelに公開済み)。
 const TOKEN_ENDPOINT = "https://mirisevoicelink.vercel.app/api/token";
@@ -82,6 +79,61 @@ export default function App() {
     const t = new Date().toTimeString().slice(0, 8);
     setDebugLog((prev) => [...prev.slice(-24), `${t} ${msg}`]);
   }, []);
+
+  // setupIOSAudioManagement相当を自前で実装し、各段階をlogDebugに出す。
+  // WebRTCの録音/再生エンジンがON/OFFされる直前(willEnableEngine)・直後
+  // (didDisableEngine)に呼ばれる。ここでAVAudioSessionのカテゴリ設定と
+  // 有効化/無効化を行わないと、setMicrophoneEnabled自体は成功したように
+  // 見えても実際には録音エンジンが起動しない。
+  useEffect(() => {
+    let audioEngineState = { isPlayoutEnabled: false, isRecordingEnabled: false };
+
+    const handleEngineStateUpdate = async (newState: {
+      isPlayoutEnabled: boolean;
+      isRecordingEnabled: boolean;
+    }) => {
+      const oldState = audioEngineState;
+      logDebug(
+        `AudioEngine: 要求 playout=${newState.isPlayoutEnabled} recording=${newState.isRecordingEnabled}` +
+          `(旧 playout=${oldState.isPlayoutEnabled} recording=${oldState.isRecordingEnabled})`,
+      );
+      try {
+        if (
+          !newState.isPlayoutEnabled &&
+          !newState.isRecordingEnabled &&
+          (oldState.isPlayoutEnabled || oldState.isRecordingEnabled)
+        ) {
+          logDebug("AudioEngine: stopAudioSession開始");
+          await AudioSession.stopAudioSession();
+          logDebug("AudioEngine: stopAudioSession完了");
+        } else if (newState.isRecordingEnabled || newState.isPlayoutEnabled) {
+          logDebug("AudioEngine: setAppleAudioConfiguration開始");
+          await AudioSession.setAppleAudioConfiguration({
+            audioCategory: "playAndRecord",
+            audioMode: "voiceChat",
+            audioCategoryOptions: ["allowBluetooth", "allowBluetoothA2DP"],
+          });
+          logDebug("AudioEngine: setAppleAudioConfiguration完了");
+          if (!oldState.isPlayoutEnabled && !oldState.isRecordingEnabled) {
+            logDebug("AudioEngine: startAudioSession開始");
+            await AudioSession.startAudioSession();
+            logDebug("AudioEngine: startAudioSession完了");
+          }
+        }
+        audioEngineState = newState;
+      } catch (e) {
+        logDebug(`AudioEngine: エラー ${e instanceof Error ? e.message : String(e)}`);
+        throw e;
+      }
+    };
+
+    audioDeviceModuleEvents.setWillEnableEngineHandler(handleEngineStateUpdate);
+    audioDeviceModuleEvents.setDidDisableEngineHandler(handleEngineStateUpdate);
+    return () => {
+      audioDeviceModuleEvents.setWillEnableEngineHandler(null);
+      audioDeviceModuleEvents.setDidDisableEngineHandler(null);
+    };
+  }, [logDebug]);
 
   useEffect(() => {
     micOnRef.current = micOn;
