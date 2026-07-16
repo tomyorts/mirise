@@ -405,12 +405,27 @@ export default function App() {
           logDebug(`PTT: audioSessionDidActivateエラー ${e instanceof Error ? e.message : String(e)}`);
         }
         audioActiveRef.current = true;
-        // 音声セッションの有効化がwaitAudioActiveの待ち時間より遅れて届いた場合の
-        // 保険: まだ送信ボタンが押されたままなら、ここで改めてマイクを有効化する。
-        // (setMicrophoneEnabled(true)は既に有効な場合は無害な無処理になる)
-        if (txActiveRef.current) {
-          void setMic(true);
-        }
+        void (async () => {
+          // 診断ログで判明: 接続直後のウォームアップでAudioEngineのハンドラは
+          // 一度だけ発火し、それ以降(実際のPTT送信時)は録音のON/OFFだけでは
+          // 二度と発火しない(playoutが有効なままのため、エンジンの完全な
+          // 有効化/無効化の境界を跨がない)。そのため、ロック中にOSがエンジンを
+          // 休止させていても誰も再始動させないまま「成功」してしまう。
+          // ここでPTTの有効化タイミングに合わせて明示的に再始動させる。
+          try {
+            logDebug("PTT: startAudioSession(強制再始動)開始");
+            await AudioSession.startAudioSession();
+            logDebug("PTT: startAudioSession(強制再始動)完了");
+          } catch (e) {
+            logDebug(`PTT: startAudioSession(強制再始動)エラー ${e instanceof Error ? e.message : String(e)}`);
+          }
+          // 音声セッションの有効化がwaitAudioActiveの待ち時間より遅れて届いた場合の
+          // 保険: まだ送信ボタンが押されたままなら、ここで改めてマイクを有効化する。
+          // (setMicrophoneEnabled(true)は既に有効な場合は無害な無処理になる)
+          if (txActiveRef.current) {
+            void setMic(true);
+          }
+        })();
       }),
       PttChannel.addListener("onDeactivateAudio", () => {
         logDebug("PTTイベント: onDeactivateAudio");
