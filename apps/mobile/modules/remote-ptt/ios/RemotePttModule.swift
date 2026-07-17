@@ -19,7 +19,7 @@ public class RemotePttModule: Module {
 
     // どのネイティブビルドが実機に入っているかを判別するためのタグ。
     Constants([
-      "buildTag": "ble-1"
+      "buildTag": "ble-2"
     ])
 
     // 購読を開始する。

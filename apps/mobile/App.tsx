@@ -86,6 +86,14 @@ export default function App() {
   const connectedRef = useRef(false);
   // BLEトグル送信の切り忘れ防止タイマー。
   const bleTxAutoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // BLEトグルの「意図」。txActiveRefは送信開始イベントが往復してから立つため、
+  // 開始確定前の2度目の押下を「停止」と判定するにはこちらが必要
+  // (これが無いと、素早い2度押しが停止でなく再開始になる=止めたつもりで止まらない)。
+  const bleTxIntentRef = useRef(false);
+  // 今回の送信がBLEトグル起点か(自動停止タイマーを張るのはこの場合のみ)。
+  const bleToggleInitiatedRef = useRef(false);
+  // BLEボタンの状態詳細(登録フローの案内文などを画面に出す)。
+  const [bleDetail, setBleDetail] = useState<string | null>(null);
   // トグル判定を最新値で行うための参照 + 自動OFFタイマー。
   const micOnRef = useRef(false);
   const autoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -414,6 +422,20 @@ export default function App() {
       `PTT開始要求: stale=${staleMs}ms room.state=${room?.state ?? "なし"} suspectedStale=${suspectedStale}`,
     );
 
+    // 中断時は必ずシステム側の送信も終了させる。この関数が動いている時点で
+    // requestBeginTransmittingは成功済み=システムは「送信中」を表示している。
+    // ここで黙ってreturnすると、マイクは動いていないのにシステム表示だけが
+    // 「送信中」のまま残る(ロック中のユーザーは無音送信に気づけない)。
+    const abortTransmit = async (reason: string) => {
+      logDebug(`PTT: 中断(${reason}) → システム送信を終了`);
+      txActiveRef.current = false;
+      try {
+        await PttChannel?.endTransmitting();
+      } catch {
+        // noop
+      }
+    };
+
     if (!suspectedStale && room && room.state === ConnectionState.Connected) {
       logDebug("PTT: 高速経路(再接続なし)");
       const activated = await waitAudioActive();
@@ -423,7 +445,7 @@ export default function App() {
         return;
       }
       if (!activated) {
-        logDebug("PTT: 音声セッション未有効のため送信を中断(録音できない状態)");
+        await abortTransmit("音声セッション未有効=録音できない状態");
         return;
       }
       await setMic(true);
@@ -437,8 +459,12 @@ export default function App() {
     logDebug("PTT: 再接続経路");
     const ok = await connect();
     logDebug(`PTT: connect結果=${ok}`);
-    if (!ok || !txActiveRef.current) {
-      logDebug(`PTT: 中断(ok=${ok} txActive=${txActiveRef.current})`);
+    if (!ok) {
+      await abortTransmit("再接続失敗");
+      return;
+    }
+    if (!txActiveRef.current) {
+      logDebug("PTT: 再接続中に離された");
       return;
     }
     const activated = await waitAudioActive();
@@ -448,7 +474,7 @@ export default function App() {
       return;
     }
     if (!activated) {
-      logDebug("PTT: 音声セッション未有効のため送信を中断(録音できない状態)");
+      await abortTransmit("音声セッション未有効=録音できない状態");
       return;
     }
     await setMic(true);
@@ -479,11 +505,23 @@ export default function App() {
       }),
       PttChannel.addListener("onBeginTransmitting", () => {
         logDebug("PTTイベント: onBeginTransmitting");
+        // 切り忘れ防止タイマーは「送信開始が実際に確定した」この時点で張る。
+        // 押下時(要求時)に張ると、要求が失敗した場合にタイマーだけが残り、
+        // 30秒後に無関係な送信(ロック画面の長押しなど)を勝手に切ってしまう。
+        if (bleToggleInitiatedRef.current) {
+          if (bleTxAutoOffRef.current) clearTimeout(bleTxAutoOffRef.current);
+          bleTxAutoOffRef.current = setTimeout(() => {
+            logDebug("BLEボタン: 自動停止(切り忘れ防止)");
+            void PttChannel?.endTransmitting();
+          }, AUTO_OFF_MS);
+        }
         void pttTransmitStart();
       }),
       PttChannel.addListener("onEndTransmitting", () => {
         logDebug("PTTイベント: onEndTransmitting");
-        // BLEトグルの切り忘れ防止タイマーは、どの経路で終了しても解除する。
+        // BLEトグルの意図・タイマーは、どの経路で終了しても確実にリセットする。
+        bleTxIntentRef.current = false;
+        bleToggleInitiatedRef.current = false;
         if (bleTxAutoOffRef.current) {
           clearTimeout(bleTxAutoOffRef.current);
           bleTxAutoOffRef.current = null;
@@ -563,19 +601,41 @@ export default function App() {
   // BLEボタン(iTag型)押下: 送信ON/OFFのトグル。
   // PTT参加中はPTKit経由(ロック中でも動く)。未参加で通常接続中なら従来のトグル。
   const handleBlePress = useCallback(() => {
-    if (pttJoinedRef.current && PttChannel) {
-      if (txActiveRef.current) {
+    // 参加状態は「ネイティブの真実」も確認する。アプリがメモリ回収→
+    // バックグラウンド復元された直後は、JS側のpttJoinedRefがまだfalseでも
+    // ネイティブのPTChannelManagerは参加済みのことがある(この確認が無いと、
+    // 復元後の押下がすべて「未接続のため無視」になり、ロック運用が死ぬ)。
+    let nativeJoined = false;
+    try {
+      nativeJoined =
+        typeof PttChannel?.getState === "function" ? PttChannel.getState().joined : false;
+    } catch {
+      nativeJoined = false;
+    }
+    if ((pttJoinedRef.current || nativeJoined) && PttChannel) {
+      if (nativeJoined && !pttJoinedRef.current) {
+        setPttJoined(true);
+      }
+      // トグル判定は「意図(bleTxIntentRef)」または「確定した送信状態」で行う。
+      // 開始要求から確定イベントまで1秒以上かかることがあり、txActiveRefだけを
+      // 見ると、その間の2度目の押下が「停止」でなく「再開始」になってしまう。
+      const inTx = bleTxIntentRef.current || txActiveRef.current;
+      if (inTx) {
+        bleTxIntentRef.current = false;
         logDebug("BLEボタン: 押下 → PTT送信停止");
-        void PttChannel.endTransmitting();
+        PttChannel.endTransmitting().catch((e) => {
+          logDebug(`BLEボタン: 停止失敗 ${e instanceof Error ? e.message : String(e)}`);
+        });
       } else {
+        bleTxIntentRef.current = true;
+        bleToggleInitiatedRef.current = true;
         logDebug("BLEボタン: 押下 → PTT送信開始");
-        void PttChannel.beginTransmitting();
-        // 切り忘れ防止: トグル開始からAUTO_OFF_MSで自動停止。
-        if (bleTxAutoOffRef.current) clearTimeout(bleTxAutoOffRef.current);
-        bleTxAutoOffRef.current = setTimeout(() => {
-          logDebug("BLEボタン: 自動停止(切り忘れ防止)");
-          void PttChannel?.endTransmitting();
-        }, AUTO_OFF_MS);
+        PttChannel.beginTransmitting().catch((e) => {
+          // 失敗したら意図もリセットする(次の押下がまた「開始」になるように)。
+          bleTxIntentRef.current = false;
+          bleToggleInitiatedRef.current = false;
+          logDebug(`BLEボタン: 開始失敗 ${e instanceof Error ? e.message : String(e)}`);
+        });
       }
       return;
     }
@@ -597,6 +657,7 @@ export default function App() {
       }),
       BleButton.addListener("onStateChanged", (payload) => {
         logDebug(`BLEボタン: ${payload.state} ${payload.detail}`);
+        setBleDetail(payload.detail);
         setBleStatus(BleButton?.getStatus() ?? { registered: false, connected: false });
       }),
     ];
@@ -621,6 +682,9 @@ export default function App() {
       setError(msg);
     } finally {
       setBleBusy(false);
+      // 登録に失敗した場合でも、既存の登録ボタンへの接続維持を必ず復旧させる
+      // (ネイティブ側でも復旧するが、JS側からも念押しする)。
+      BleButton?.start();
       setBleStatus(BleButton?.getStatus() ?? { registered: false, connected: false });
     }
   }, [logDebug]);
@@ -783,7 +847,16 @@ export default function App() {
               iTag型（紛失防止タグ）のボタンを登録すると、押すたびに送信ON/OFFできます。
               🔒 画面ロック中・ポケットの中でも動作します（切り忘れ防止のため約30秒で自動停止）。
               ※シャッターリモコン等のキーボード型はロック中は使えません（iOSの仕様）。
+              ※登録は1台ずつ・他のタグは離して行ってください。
             </Text>
+            {bleStatus.registered && !pttJoined ? (
+              <Text style={[styles.hint, { color: "#b76e00" }]}>
+                ⚠️ ロック中にBLEボタンを使うには、上の「PTTを有効化」も押してください。
+              </Text>
+            ) : null}
+            {bleBusy && bleDetail ? (
+              <Text style={[styles.hint, { color: "#0f4bd8" }]}>▶ {bleDetail}</Text>
+            ) : null}
             {!bleStatus.registered ? (
               <Pressable
                 style={[styles.secondary, bleBusy && styles.disabled]}
@@ -791,7 +864,9 @@ export default function App() {
                 disabled={bleBusy}
               >
                 <Text style={styles.secondaryText}>
-                  {bleBusy ? "検索中...（ボタンを1回押してください）" : "BLEボタンを登録"}
+                  {bleBusy
+                    ? "検索中...（画面の案内に従ってください）"
+                    : "BLEボタンを登録（タグを手元に置いて押す）"}
                 </Text>
               </Pressable>
             ) : (

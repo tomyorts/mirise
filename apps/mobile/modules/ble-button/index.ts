@@ -9,6 +9,7 @@ export type BleButtonState =
   | "idle"
   | "scanning"
   | "connecting"
+  | "confirming"
   | "connected"
   | "disconnected"
   | "error";
@@ -32,7 +33,7 @@ export type BleButtonModuleType = {
   unregister(): void;
   addListener(
     eventName: "onPress",
-    listener: (payload: Record<string, never>) => void,
+    listener: (payload: { replayed?: boolean }) => void,
   ): EventSubscription;
   addListener(
     eventName: "onStateChanged",

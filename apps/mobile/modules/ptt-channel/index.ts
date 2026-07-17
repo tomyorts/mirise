@@ -11,6 +11,11 @@ export type PttChannelEvent =
   | "onError";
 
 export type PttChannelModuleType = {
+  /**
+   * ネイティブ側の「本当の参加状態」。JSのstateはアプリ再起動で消えるが、
+   * ネイティブは復元後も参加済みのことがある(旧ビルドには無いのでoptional)。
+   */
+  getState?: () => { joined: boolean; channelUUID?: string };
   /** PTTチャンネルに参加(バックグラウンド送信が可能になる)。channelUUIDを返す */
   join(name: string): Promise<string>;
   /** チャンネルから退出 */

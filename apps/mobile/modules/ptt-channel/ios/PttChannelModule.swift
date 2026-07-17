@@ -38,6 +38,18 @@ public class PttChannelModule: Module {
       }
     }
 
+    // ネイティブ側の「本当の参加状態」を返す。JS側のstateはアプリ再起動
+    // (メモリ回収→バックグラウンド復元)でfalseに戻るが、ネイティブの
+    // PTChannelManagerは復元されて参加済みのことがある。BLEボタン押下時は
+    // こちらを真実として参照する。
+    Function("getState") { () -> [String: Any] in
+      var result: [String: Any] = ["joined": self.channelUUID != nil]
+      if let uuid = self.channelUUID {
+        result["channelUUID"] = uuid.uuidString
+      }
+      return result
+    }
+
     AsyncFunction("join") { (name: String) async throws -> String in
       if #available(iOS 16.0, *) {
         return try await self.joinImpl(name)
@@ -127,15 +139,23 @@ public class PttChannelModule: Module {
     channelUUID = nil
   }
 
+  // 無言で成功に見せない: チャンネル未参加なら明確にエラーを返し、
+  // Manager作成が進行中なら(managerBoxの完成を待たず諦めるのではなく)待つ。
   @available(iOS 16.0, *)
   private func beginImpl() async throws {
-    guard let uuid = channelUUID, let m = managerBox as? PTChannelManager else { return }
+    guard let uuid = channelUUID else {
+      throw NSError(
+        domain: "PttChannel", code: 3,
+        userInfo: [NSLocalizedDescriptionKey: "PTTチャンネル未参加のため送信できません"]
+      )
+    }
+    let m = try await manager()
     try await m.requestBeginTransmitting(channelUUID: uuid)
   }
 
   @available(iOS 16.0, *)
   private func endImpl() async {
-    guard let uuid = channelUUID, let m = managerBox as? PTChannelManager else { return }
+    guard let uuid = channelUUID, let m = try? await manager() else { return }
     await m.stopTransmitting(channelUUID: uuid)
   }
 }
