@@ -18,6 +18,7 @@ import {
 } from "@livekit/react-native-webrtc";
 import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
+import BleButton, { type BleButtonStatus } from "./modules/ble-button";
 import PttChannel from "./modules/ptt-channel";
 import RemotePtt from "./modules/remote-ptt";
 
@@ -75,6 +76,16 @@ export default function App() {
   // Phase B: ポケット/バックグラウンド送信(PushToTalkフレームワーク)。
   const [pttJoined, setPttJoined] = useState(false);
   const [pttBusy, setPttBusy] = useState(false);
+  // BLEボタン(iTag型)の状態。ロック中でもGATT通知が届くため、押下でPTT送信をトグルする。
+  const [bleStatus, setBleStatus] = useState<BleButtonStatus>(
+    () => BleButton?.getStatus() ?? { registered: false, connected: false },
+  );
+  const [bleBusy, setBleBusy] = useState(false);
+  // 最新値参照用(BLE押下ハンドラはイベント購読内から呼ばれるため、stateを直接見ると古い値になる)。
+  const pttJoinedRef = useRef(false);
+  const connectedRef = useRef(false);
+  // BLEトグル送信の切り忘れ防止タイマー。
+  const bleTxAutoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // トグル判定を最新値で行うための参照 + 自動OFFタイマー。
   const micOnRef = useRef(false);
   const autoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -154,6 +165,14 @@ export default function App() {
   useEffect(() => {
     micOnRef.current = micOn;
   }, [micOn]);
+
+  useEffect(() => {
+    pttJoinedRef.current = pttJoined;
+  }, [pttJoined]);
+
+  useEffect(() => {
+    connectedRef.current = connected;
+  }, [connected]);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -464,6 +483,11 @@ export default function App() {
       }),
       PttChannel.addListener("onEndTransmitting", () => {
         logDebug("PTTイベント: onEndTransmitting");
+        // BLEトグルの切り忘れ防止タイマーは、どの経路で終了しても解除する。
+        if (bleTxAutoOffRef.current) {
+          clearTimeout(bleTxAutoOffRef.current);
+          bleTxAutoOffRef.current = null;
+        }
         void pttTransmitEnd();
       }),
       PttChannel.addListener("onActivateAudio", () => {
@@ -534,6 +558,76 @@ export default function App() {
   }, []);
   const pttPressOut = useCallback(() => {
     void PttChannel?.endTransmitting();
+  }, []);
+
+  // BLEボタン(iTag型)押下: 送信ON/OFFのトグル。
+  // PTT参加中はPTKit経由(ロック中でも動く)。未参加で通常接続中なら従来のトグル。
+  const handleBlePress = useCallback(() => {
+    if (pttJoinedRef.current && PttChannel) {
+      if (txActiveRef.current) {
+        logDebug("BLEボタン: 押下 → PTT送信停止");
+        void PttChannel.endTransmitting();
+      } else {
+        logDebug("BLEボタン: 押下 → PTT送信開始");
+        void PttChannel.beginTransmitting();
+        // 切り忘れ防止: トグル開始からAUTO_OFF_MSで自動停止。
+        if (bleTxAutoOffRef.current) clearTimeout(bleTxAutoOffRef.current);
+        bleTxAutoOffRef.current = setTimeout(() => {
+          logDebug("BLEボタン: 自動停止(切り忘れ防止)");
+          void PttChannel?.endTransmitting();
+        }, AUTO_OFF_MS);
+      }
+      return;
+    }
+    if (connectedRef.current) {
+      logDebug("BLEボタン: 押下 → 送信トグル(通常経路)");
+      toggleMic();
+      return;
+    }
+    logDebug("BLEボタン: 押下(未接続のため無視)");
+  }, [logDebug, toggleMic]);
+
+  // BLEボタンのイベント購読 + 起動時の接続維持開始。
+  useEffect(() => {
+    if (!BleButton) return;
+    BleButton.start();
+    const subs = [
+      BleButton.addListener("onPress", () => {
+        handleBlePress();
+      }),
+      BleButton.addListener("onStateChanged", (payload) => {
+        logDebug(`BLEボタン: ${payload.state} ${payload.detail}`);
+        setBleStatus(BleButton?.getStatus() ?? { registered: false, connected: false });
+      }),
+    ];
+    return () => subs.forEach((s) => s?.remove());
+  }, [handleBlePress, logDebug]);
+
+  // BLEボタンの登録(初期設定)。近くのiTag型ボタンを探して保存する。
+  const setupBleButton = useCallback(async () => {
+    if (!BleButton) {
+      setError("このビルドはBLEボタン未対応です(再ビルドが必要)");
+      return;
+    }
+    setBleBusy(true);
+    setError(null);
+    try {
+      logDebug("BLEボタン: 登録スキャン開始");
+      const result = await BleButton.startSetup();
+      logDebug(`BLEボタン: 登録成功 ${result.name}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logDebug(`BLEボタン: 登録失敗 ${msg}`);
+      setError(msg);
+    } finally {
+      setBleBusy(false);
+      setBleStatus(BleButton?.getStatus() ?? { registered: false, connected: false });
+    }
+  }, [logDebug]);
+
+  const unregisterBleButton = useCallback(() => {
+    BleButton?.unregister();
+    setBleStatus(BleButton?.getStatus() ?? { registered: false, connected: false });
   }, []);
 
   useEffect(() => {
@@ -622,8 +716,8 @@ export default function App() {
 
             <Text style={styles.hint}>
               「押して話す」を押している間だけ声が流れます。常時ONにはなりません。
-              🔘 BLEリモコン（シャッター・ページめくり器・指輪型など、Enter/矢印/ページ送り
-              キーを送るもの）でも送信ON/OFF（トグル）できます。
+              🔘 キーボード型BLEリモコン（シャッター・ページめくり器など）でも送信ON/OFF
+              （トグル）できます（画面ONのときのみ。ロック中はiTag型を使用）。
               切り忘れ防止のため、送信は約30秒で自動停止します。
               診療中は患者情報を言わず、チェア番号やセット名で運用してください。
             </Text>
@@ -668,6 +762,42 @@ export default function App() {
                   <Text style={styles.secondaryText}>PTTを無効化（退出）</Text>
                 </Pressable>
               </>
+            )}
+
+            <Text style={[styles.cardLabel, { marginTop: 16 }]}>
+              🔘 BLEボタン（iTag型・ロック中もOK）
+            </Text>
+            <Text
+              style={[
+                styles.hint,
+                { color: bleStatus.connected ? "#0f8f4f" : bleStatus.registered ? "#b76e00" : "#5a6478" },
+              ]}
+            >
+              {BleButton
+                ? bleStatus.registered
+                  ? `${bleStatus.name ?? "BLEボタン"}: ${bleStatus.connected ? "接続中 ✅" : "未接続（再接続待ち）"}`
+                  : "未登録"
+                : "このビルドは未対応（再ビルドが必要）"}
+            </Text>
+            <Text style={styles.hint}>
+              iTag型（紛失防止タグ）のボタンを登録すると、押すたびに送信ON/OFFできます。
+              🔒 画面ロック中・ポケットの中でも動作します（切り忘れ防止のため約30秒で自動停止）。
+              ※シャッターリモコン等のキーボード型はロック中は使えません（iOSの仕様）。
+            </Text>
+            {!bleStatus.registered ? (
+              <Pressable
+                style={[styles.secondary, bleBusy && styles.disabled]}
+                onPress={() => void setupBleButton()}
+                disabled={bleBusy}
+              >
+                <Text style={styles.secondaryText}>
+                  {bleBusy ? "検索中...（ボタンを1回押してください）" : "BLEボタンを登録"}
+                </Text>
+              </Pressable>
+            ) : (
+              <Pressable style={styles.secondary} onPress={unregisterBleButton}>
+                <Text style={styles.secondaryText}>BLEボタンの登録を解除</Text>
+              </Pressable>
             )}
 
             <Text style={[styles.cardLabel, { marginTop: 16 }]}>

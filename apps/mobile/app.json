@@ -15,7 +15,8 @@
       },
       "infoPlist": {
         "NSMicrophoneUsageDescription": "院内インカムで通話するためにマイクを使用します。",
-        "UIBackgroundModes": ["audio", "push-to-talk"]
+        "NSBluetoothAlwaysUsageDescription": "BLEリモコン（ボタン）で送信を開始/停止するためにBluetoothを使用します。",
+        "UIBackgroundModes": ["audio", "push-to-talk", "bluetooth-central"]
       }
     },
     "android": {
