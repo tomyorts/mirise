@@ -303,7 +303,20 @@ export default function App() {
         return;
       }
       try {
+        // 実測統計で判明した核心: 一度ミュートしたマイクは、ミュート解除
+        // (unmute)しても録音エンジンの入力が再開されない(マイク音量・累積
+        // エネルギー・送信パケットがウォームアップ時点の値のまま完全に固定)。
+        // そのため、unmuteによる再開に頼らず、既存トラックがある場合は
+        // restartTrack()で録音デバイスの取得からやり直して確実に再開させる。
+        const existing = room.localParticipant.getTrackPublication(
+          Track.Source.Microphone,
+        )?.audioTrack;
         await room.localParticipant.setMicrophoneEnabled(on);
+        if (on && existing) {
+          logDebug("setMic: トラック再起動(録音を確実に再開)開始");
+          await existing.restartTrack();
+          logDebug("setMic: トラック再起動完了");
+        }
         setMicOn(on);
         logDebug(`setMic(${on}): 完了`);
         if (on) {
