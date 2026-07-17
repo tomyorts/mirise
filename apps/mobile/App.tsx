@@ -12,7 +12,7 @@ import {
 } from "react-native";
 import { AudioSession, registerGlobals } from "@livekit/react-native";
 import { audioDeviceModuleEvents } from "@livekit/react-native-webrtc";
-import { ConnectionState, Room, RoomEvent } from "livekit-client";
+import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
 import PttChannel from "./modules/ptt-channel";
 import RemotePtt from "./modules/remote-ptt";
@@ -254,6 +254,47 @@ export default function App() {
     return attempt;
   }, [cleanup, identity, roomId]);
 
+  // マイクの実測統計(WebRTC統計)を診断ログに出す。「マイクが実際に音を拾えて
+  // いるか(音量/累積エネルギー)」と「サーバーへパケットを送れているか」を
+  // スマホ内部だけで確認できる。サーバー計測(ActiveSpeakersChanged)が出ない
+  // 原因が『無音の録音』なのか『送信の失敗』なのかを切り分けるための計測。
+  const logMicStats = useCallback(
+    async (label: string) => {
+      try {
+        const room = roomRef.current;
+        const pub = room?.localParticipant.getTrackPublication(Track.Source.Microphone);
+        const track = pub?.track;
+        if (!track) {
+          logDebug(`統計(${label}): マイクトラックなし`);
+          return;
+        }
+        const mst = track.mediaStreamTrack;
+        logDebug(
+          `統計(${label}): mute=${track.isMuted} track=${mst?.readyState}/${mst?.enabled ? "有効" : "無効"}`,
+        );
+        const report = await track.getRTCStatsReport();
+        if (!report) {
+          logDebug(`統計(${label}): statsレポート取得不可`);
+          return;
+        }
+        report.forEach((s) => {
+          const stat = s as Record<string, unknown>;
+          if (stat.type === "media-source") {
+            const level = typeof stat.audioLevel === "number" ? stat.audioLevel.toFixed(4) : "?";
+            const energy =
+              typeof stat.totalAudioEnergy === "number" ? stat.totalAudioEnergy.toFixed(5) : "?";
+            logDebug(`統計(${label}): マイク音量=${level} 累積=${energy}`);
+          } else if (stat.type === "outbound-rtp") {
+            logDebug(`統計(${label}): 送信packets=${stat.packetsSent ?? "?"}`);
+          }
+        });
+      } catch (e) {
+        logDebug(`統計(${label}): エラー ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+    [logDebug],
+  );
+
   const setMic = useCallback(
     async (on: boolean) => {
       const room = roomRef.current;
@@ -265,13 +306,19 @@ export default function App() {
         await room.localParticipant.setMicrophoneEnabled(on);
         setMicOn(on);
         logDebug(`setMic(${on}): 完了`);
+        if (on) {
+          // 送信ONの2秒後に実測統計を自動で記録(押している間に計測される)。
+          setTimeout(() => {
+            void logMicStats("ON+2秒");
+          }, 2000);
+        }
         if (!on) clearAutoOff();
       } catch (e) {
         logDebug(`setMic(${on}): エラー ${e instanceof Error ? e.message : String(e)}`);
         setError(e instanceof Error ? e.message : "マイク操作に失敗しました");
       }
     },
-    [clearAutoOff, logDebug],
+    [clearAutoOff, logDebug, logMicStats],
   );
 
   // タップ/ハードボタン用トグル: ONにしたら AUTO_OFF_MS で自動OFF。
