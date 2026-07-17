@@ -11,7 +11,11 @@ import {
   View,
 } from "react-native";
 import { AudioSession, registerGlobals } from "@livekit/react-native";
-import { audioDeviceModuleEvents } from "@livekit/react-native-webrtc";
+import {
+  AudioDeviceModule,
+  AudioEngineMuteMode,
+  audioDeviceModuleEvents,
+} from "@livekit/react-native-webrtc";
 import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
 import PttChannel from "./modules/ptt-channel";
@@ -32,6 +36,18 @@ const AUTO_OFF_MS = 30_000;
 // 動作がブラックボックスだったため。logDebugで各段階を画面に出すために
 // ライブラリの実装を展開している)
 registerGlobals({ autoConfigureAudioSession: false });
+
+// 録音エンジンのミュートモードを「RestartEngine」に変更する。
+// 実測統計で、既定モードではミュート解除後に録音エンジンの入力が再開されず
+// (音量・送信パケットがウォームアップ時点の値で完全固定)、トラックを
+// 作り直しても無音のままになることを確認した。RestartEngineモードは
+// ミュート解除のたびにエンジン自体を止めて再起動するため、この
+// 「入力が死んだまま」状態を毎回リセットできる。
+if (Platform.OS === "ios") {
+  AudioDeviceModule.setMuteMode(AudioEngineMuteMode.RestartEngine).catch((e) => {
+    console.warn("setMuteMode failed", e);
+  });
+}
 
 // Web版と同じトークン発行APIを再利用する(Vercelに公開済み)。
 const TOKEN_ENDPOINT = "https://mirisevoicelink.vercel.app/api/token";
@@ -272,6 +288,15 @@ export default function App() {
         logDebug(
           `統計(${label}): mute=${track.isMuted} track=${mst?.readyState}/${mst?.enabled ? "有効" : "無効"}`,
         );
+        try {
+          logDebug(
+            `統計(${label}): エンジン=${AudioDeviceModule.isEngineRunning() ? "動作中" : "停止"} ` +
+              `録音=${AudioDeviceModule.isRecording() ? "中" : "停止"} ` +
+              `ADMミュート=${AudioDeviceModule.isMicrophoneMuted()}`,
+          );
+        } catch (e) {
+          logDebug(`統計(${label}): エンジン状態取得不可 ${e instanceof Error ? e.message : String(e)}`);
+        }
         const report = await track.getRTCStatsReport();
         if (!report) {
           logDebug(`統計(${label}): statsレポート取得不可`);
@@ -303,20 +328,11 @@ export default function App() {
         return;
       }
       try {
-        // 実測統計で判明した核心: 一度ミュートしたマイクは、ミュート解除
-        // (unmute)しても録音エンジンの入力が再開されない(マイク音量・累積
-        // エネルギー・送信パケットがウォームアップ時点の値のまま完全に固定)。
-        // そのため、unmuteによる再開に頼らず、既存トラックがある場合は
-        // restartTrack()で録音デバイスの取得からやり直して確実に再開させる。
-        const existing = room.localParticipant.getTrackPublication(
-          Track.Source.Microphone,
-        )?.audioTrack;
+        // ミュート解除後の録音再開は、AudioDeviceModuleのミュートモードを
+        // RestartEngine(アプリ起動時に設定)にすることでエンジンごと再起動させる。
+        // トラックのrestartTrack()では直らないことを実測で確認済み
+        // (トラック層ではなくエンジン層の問題のため)。
         await room.localParticipant.setMicrophoneEnabled(on);
-        if (on && existing) {
-          logDebug("setMic: トラック再起動(録音を確実に再開)開始");
-          await existing.restartTrack();
-          logDebug("setMic: トラック再起動完了");
-        }
         setMicOn(on);
         logDebug(`setMic(${on}): 完了`);
         if (on) {
