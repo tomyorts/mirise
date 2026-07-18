@@ -443,7 +443,7 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     // 前プロセスの設定スキャンが残っていても、その文脈(Promise等)は失われている
     // ので必ず止める(止めないと無期限スキャンで電池を消耗する)。
     if central.isScanning { central.stopScan() }
-    if let restored = dict[CBCentralManagerOptionRestoredStatePeripheralsKey] as? [CBPeripheral],
+    if let restored = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
        let p = restored.first {
       peripheral = p
       p.delegate = self
