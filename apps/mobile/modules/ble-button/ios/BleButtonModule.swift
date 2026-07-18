@@ -29,7 +29,7 @@ public class BleButtonModule: Module {
     Events("onPress", "onStateChanged")
 
     Constants([
-      "buildTag": "ble-2"
+      "buildTag": "ble-3"
     ])
 
     OnCreate {
@@ -119,9 +119,9 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     CBUUID(string: "1812"), // HID
     CBUUID(string: "1804"), // Tx Power
   ]
-  // 登録時に要求する最低電波強度。「手に持ってスマホのすぐ近く」ならこれを上回る。
-  // 遠くにある無関係な機器・他人のタグの誤登録を防ぐ。
-  private static let setupMinRSSI = -70
+  // 登録時に候補として扱う最低電波強度。「手に持ってスマホのすぐ近く」ならこれを
+  // 上回る。遠くの無関係な機器を候補から外しつつ、安タグを取りこぼさない値。
+  private static let setupMinRSSI = -75
 
   private var manager: CBCentralManager?
   private var peripheral: CBPeripheral?
@@ -138,7 +138,11 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
 
   // 初期設定(スキャン→接続→押下確認)中の状態。
   private var setupPromise: Promise?
-  private var setupCandidates: [UUID: (peripheral: CBPeripheral, rssi: Int, isTagService: Bool)] = [:]
+  // スキャンで見つけた候補(識別子ごとに最良RSSIを保持)。scoreはタグらしさ:
+  // 2=FFE0広告あり / 1=名前にtag / 0=その他(近ければ候補に含める)。
+  private var setupCandidates: [UUID: (peripheral: CBPeripheral, rssi: Int, score: Int)] = [:]
+  // 近い順に並べた接続試行キュー(先頭から1台ずつ接続→押下確認していく)。
+  private var setupQueue: [CBPeripheral] = []
   private var setupAwaitingPress = false
   private var scanDeadlineWork: DispatchWorkItem?
   private var connectTimeoutWork: DispatchWorkItem?
@@ -207,7 +211,7 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
       self?.failSetup("E_TIMEOUT", "時間切れです。もう一度お試しください")
     }
     masterTimeoutWork = master
-    DispatchQueue.main.asyncAfter(deadline: .now() + 45, execute: master)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 70, execute: master)
 
     // 重要: didUpdateStateは「状態が変わった時」しか呼ばれない。
     // すでに確定している状態(オフ/権限なし/非対応)はここで即座に失敗させる。
@@ -289,6 +293,7 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     pressCharUUIDs = []
     discoveredNotifyChars = []
     pendingServiceDiscoveries = 0
+    setupQueue = []
   }
 
   private func cancelSetupTimers() {
@@ -306,34 +311,63 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     guard let manager, manager.state == .poweredOn, setupPromise != nil else { return }
     guard scanDeadlineWork == nil, !manager.isScanning else { return }
     setupCandidates = [:]
-    // サービス指定なしの全体スキャン(前面のみ)。iTagの多くはFFE0を広告するが、
-    // 広告に載せない個体もあるため名前でも拾う。
+    setupQueue = []
+    // サービス指定なしの全体スキャン(前面のみ)。安いiTagは広告にFFE0も名前も
+    // 載せないことが多いため、フィルターせず「近くの機器」を広く候補にし、
+    // 実際のボタン押下で本物を確定する(誤登録は押下確認で弾く)。
     manager.scanForPeripherals(withServices: nil, options: nil)
     let work = DispatchWorkItem { [weak self] in self?.finishScanWindow() }
     scanDeadlineWork = work
     DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: work)
   }
 
-  // スキャン時間終了: 候補から最良(タグサービス優先→電波強度)を選んで接続する。
-  // 遠い機器(他人のタグ・無関係な機器)の誤登録を防ぐため、近距離のものだけを対象にする。
+  // スキャン終了: 近い順(タグらしさ優先→電波強度)に接続試行キューを組み、
+  // 先頭から1台ずつ「接続→ボタン通知あり→実押下で確定」を試す。
   private func finishScanWindow() {
     guard setupPromise != nil else { return }
     scanDeadlineWork = nil
     manager?.stopScan()
-    let near = setupCandidates.values.filter { $0.rssi >= Self.setupMinRSSI }
-    let best = near.sorted { a, b in
-      if a.isTagService != b.isTagService { return a.isTagService }
-      return a.rssi > b.rssi
-    }.first
-    if let candidate = best {
-      connectForSetup(candidate.peripheral)
+    let ranked = setupCandidates.values
+      .filter { $0.rssi >= Self.setupMinRSSI }
+      .sorted { a, b in
+        if a.score != b.score { return a.score > b.score }
+        return a.rssi > b.rssi
+      }
+      .prefix(4)
+      .map { $0.peripheral }
+    setupQueue = Array(ranked)
+    if setupQueue.isEmpty {
+      if setupCandidates.isEmpty {
+        failSetup("E_NOT_FOUND", "ボタンが見つかりませんでした。タグのボタンを1回押した直後に、もう一度お試しください")
+      } else {
+        failSetup("E_TOO_FAR", "近くにボタンが見つかりませんでした。タグをスマホにくっつけて、もう一度お試しください")
+      }
       return
     }
-    if setupCandidates.isEmpty {
-      failSetup("E_NOT_FOUND", "ボタンが見つかりませんでした。ボタンを1回押して(起こして)から、もう一度お試しください")
-    } else {
-      failSetup("E_TOO_FAR", "ボタンの電波が弱すぎます。ボタンをスマホのすぐ近くに持って、もう一度お試しください")
+    tryNextSetupCandidate()
+  }
+
+  // キューの先頭候補に接続を試す。接続失敗・押下確認失敗のたびに次の候補へ進む。
+  private func tryNextSetupCandidate() {
+    guard setupPromise != nil else { return }
+    setupAwaitingPress = false
+    confirmTimeoutWork?.cancel()
+    confirmTimeoutWork = nil
+    connectTimeoutWork?.cancel()
+    connectTimeoutWork = nil
+    // 直前の候補(未登録)を切り離す。
+    if let p = peripheral, p.identifier != registeredUUID() {
+      manager?.cancelPeripheralConnection(p)
     }
+    peripheral = nil
+    pressCharUUIDs = []
+    discoveredNotifyChars = []
+    guard !setupQueue.isEmpty else {
+      failSetup("E_CONFIRM_TIMEOUT", "ボタンを確定できませんでした。タグをスマホの近くで押しながら、もう一度お試しください")
+      return
+    }
+    let next = setupQueue.removeFirst()
+    connectForSetup(next)
   }
 
   private func connectForSetup(_ target: CBPeripheral) {
@@ -345,31 +379,37 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     manager.connect(target, options: nil)
     let work = DispatchWorkItem { [weak self] in
       guard let self, self.setupPromise != nil else { return }
-      self.failSetup("E_CONNECT_TIMEOUT", "接続がタイムアウトしました。もう一度お試しください")
+      // この候補は接続できなかった。次の候補へ。
+      self.tryNextSetupCandidate()
     }
     connectTimeoutWork = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: work)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
   }
 
-  // 登録の確定は「実際にボタンが押された」ことを確認してから行う。
-  // これにより、たまたま近くにあった無関係なFFE0機器を誤登録しない。
+  // 登録の確定は「実際にボタンが押された」ことを確認してから行う
+  // (押下通知を持つ機器に接続できた後にのみ呼ばれる)。
   private func beginConfirmPhase(_ peripheral: CBPeripheral) {
     setupAwaitingPress = true
-    emitState("confirming", "接続しました。ボタンを1回押して確定してください")
+    emitState("confirming", "接続しました。タグのボタンをもう1回押して確定してください")
     let work = DispatchWorkItem { [weak self] in
       guard let self, self.setupPromise != nil else { return }
-      self.failSetup("E_CONFIRM_TIMEOUT", "ボタンの押下を確認できませんでした。もう一度お試しください")
+      // この候補は押下が来なかった(=別の機器の可能性)。次の候補へ。
+      self.tryNextSetupCandidate()
     }
     confirmTimeoutWork = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: work)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: work)
   }
 
   private func confirmRegistration(_ peripheral: CBPeripheral) {
     setupAwaitingPress = false
     cancelSetupTimers()
+    setupQueue = []
     UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.uuidKey)
     UserDefaults.standard.set(peripheral.name ?? "BLEボタン", forKey: Self.nameKey)
     connected = true
+    // 確定用の押下(とその解放フレーム)が、直後に送信トグルを誤発火しないよう
+    // デバウンス基準時刻を今に設定しておく。
+    lastPressAt = Date().timeIntervalSince1970
     setupPromise?.resolve(["name": peripheral.name ?? "BLEボタン"])
     setupPromise = nil
     emitState("connected", "登録しました: \(peripheral.name ?? "BLEボタン")")
@@ -457,17 +497,23 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
   }
 
   func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
-    guard setupPromise != nil, !setupAwaitingPress else { return }
+    guard setupPromise != nil, setupQueue.isEmpty, !setupAwaitingPress else { return }
     let advertised = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
     // キーボード型(HID)はロック中に使えないため候補にしない。
     if advertised.contains(Self.hidService) { return }
     let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? ""
-    let isTagService = advertised.contains(Self.tagService)
-    let nameLooksLikeTag = name.lowercased().contains("tag")
-    guard isTagService || nameLooksLikeTag else { return }
-    // 即決はしない: スキャン時間いっぱい候補を集め、最も近い(RSSI最大の)ものを
-    // 選ぶ。「最初に見つかったFFE0機器」が手元のタグとは限らないため。
-    setupCandidates[peripheral.identifier] = (peripheral, RSSI.intValue, isTagService)
+    // 安いiTagは広告にFFE0も名前も載せないことが多い。フィルターで弾かず、
+    // 「タグらしさ(score)」だけ付けて全て候補にする(近い順+押下確認で本物を選ぶ)。
+    let score: Int = advertised.contains(Self.tagService) ? 2 : (name.lowercased().contains("tag") ? 1 : 0)
+    let rssi = RSSI.intValue
+    // 同一機器は最良RSSIで更新(広告は複数回届く)。
+    if let existing = setupCandidates[peripheral.identifier] {
+      if rssi > existing.rssi {
+        setupCandidates[peripheral.identifier] = (peripheral, rssi, max(score, existing.score))
+      }
+    } else {
+      setupCandidates[peripheral.identifier] = (peripheral, rssi, score)
+    }
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -479,9 +525,9 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
         central.cancelPeripheralConnection(peripheral)
         return
       }
-      // まだ登録は確定しない: サービス発見→購読→実押下の確認を経て確定する。
+      // まだ登録は確定しない: サービス発見→(押下通知があれば)実押下の確認へ。
+      // 押下通知が無い機器なら handleDiscoveryComplete が次の候補へ進める。
       peripheral.discoverServices(nil)
-      beginConfirmPhase(peripheral)
       return
     }
     // 通常運用: 登録済みペリフェラル以外は繋がっても採用しない
@@ -498,7 +544,8 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
   func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
     if setupPromise != nil {
       guard peripheral === self.peripheral else { return }
-      failSetup("E_CONNECT", "接続に失敗しました: \(error?.localizedDescription ?? "不明なエラー")")
+      // この候補は接続できなかった。次の候補へ(全滅したらtryNextが失敗させる)。
+      tryNextSetupCandidate()
       return
     }
     // 登録済みペリフェラル以外の失敗は放置(再接続しない)。
@@ -572,7 +619,8 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     }
     guard !targets.isEmpty else {
       if setupPromise != nil {
-        failSetup("E_NO_BUTTON", "この機器にはボタン通知が見つかりませんでした(未対応の機種の可能性)")
+        // この候補にはボタン通知が無い=タグではない。次の候補へ。
+        tryNextSetupCandidate()
       } else {
         emitState("error", "ボタン通知が見つかりません(未対応の機種の可能性)")
       }
@@ -583,6 +631,10 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     subscribeGraceUntil = Date().timeIntervalSince1970 + 1.0
     for t in targets {
       peripheral.setNotifyValue(true, for: t)
+    }
+    // 設定中: 押下通知を持つ機器に繋がったので、ここで実押下の確認へ進む。
+    if setupPromise != nil, peripheral === self.peripheral {
+      beginConfirmPhase(peripheral)
     }
   }
 
