@@ -29,7 +29,7 @@ public class BleButtonModule: Module {
     Events("onPress", "onStateChanged")
 
     Constants([
-      "buildTag": "ble-5"
+      "buildTag": "ble-6"
     ])
 
     OnCreate {
@@ -584,6 +584,11 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
   func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
     if peripheral.identifier == self.peripheral?.identifier {
       connected = false
+    }
+    // 調査用: 設定の確認待ち中に、接続中の候補が切断されたら記録する。
+    // 一部の安タグは「ボタン押下=一瞬切断」で信号を出すため、その検知に使う。
+    if setupPromise != nil, setupAwaitingPress, peripheral === self.peripheral {
+      emitState("debug", "切断検知[\(peripheral.name ?? "無名")] err=\(error?.localizedDescription ?? "なし")")
     }
     // 登録済みペリフェラルのみ再接続する(設定中は行わない)。
     guard setupPromise == nil, peripheral.identifier == registeredUUID() else { return }
