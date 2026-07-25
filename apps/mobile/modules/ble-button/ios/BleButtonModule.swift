@@ -29,7 +29,7 @@ public class BleButtonModule: Module {
     Events("onPress", "onStateChanged")
 
     Constants([
-      "buildTag": "ble-3"
+      "buildTag": "ble-4"
     ])
 
     OnCreate {
@@ -502,9 +502,15 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     // キーボード型(HID)はロック中に使えないため候補にしない。
     if advertised.contains(Self.hidService) { return }
     let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? ""
+    // 明らかにタグではないApple機器(Mac/AirPods/iPhone等)は候補から除外して
+    // 無駄な接続試行を減らす(名前で判別。名前無しのタグは除外されない)。
+    let lower = name.lowercased()
+    for kw in ["macbook", "airpods", "iphone", "ipad", "apple watch", "imac", "beats"] {
+      if lower.contains(kw) { return }
+    }
     // 安いiTagは広告にFFE0も名前も載せないことが多い。フィルターで弾かず、
     // 「タグらしさ(score)」だけ付けて全て候補にする(近い順+押下確認で本物を選ぶ)。
-    let score: Int = advertised.contains(Self.tagService) ? 2 : (name.lowercased().contains("tag") ? 1 : 0)
+    let score: Int = advertised.contains(Self.tagService) ? 2 : (lower.contains("tag") ? 1 : 0)
     let rssi = RSSI.intValue
     // 同一機器は最良RSSIで更新(広告は複数回届く)。
     if let existing = setupCandidates[peripheral.identifier] {
@@ -634,23 +640,41 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     }
     // 設定中: 押下通知を持つ機器に繋がったので、ここで実押下の確認へ進む。
     if setupPromise != nil, peripheral === self.peripheral {
+      // 調査用: この機器が持つ通知特性を画面ログに出す(ボタン押下がどこに
+      // 来るかを実機で確認するため)。
+      let list = discoveredNotifyChars
+        .map { "\($0.service.uuidString)/\($0.char.uuid.uuidString)" }
+        .joined(separator: ", ")
+      emitState("debug", "通知特性[\(peripheral.name ?? "無名")]: \(list.isEmpty ? "なし" : list)")
       beginConfirmPhase(peripheral)
     }
   }
 
   func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
     guard error == nil else { return }
-    // 押下として確定したキャラクタリスティック以外の通知は無視する。
-    guard pressCharUUIDs.contains(characteristic.uuid) else { return }
     let now = Date().timeIntervalSince1970
-    // 購読直後の初期通知は押下ではない。
-    guard now > subscribeGraceUntil else { return }
 
-    // 設定中の「押下確認」: 選んだ候補からの実押下で登録を確定する。
+    // 調査用: 設定中は「どの特性に・何のデータが来たか」を全て画面ログに出す
+    // (フィルター前。ボタン押下がどこに届くかを実機で突き止めるため)。
+    if setupPromise != nil, peripheral === self.peripheral {
+      let hex = (characteristic.value?.map { String(format: "%02x", $0) }.joined()) ?? ""
+      let known = pressCharUUIDs.contains(characteristic.uuid) ? "押下候補" : "その他"
+      let grace = now <= subscribeGraceUntil ? "(初期値)" : ""
+      emitState("debug", "通知受信 \(characteristic.uuid.uuidString)=\(hex.isEmpty ? "空" : hex) [\(known)]\(grace)")
+    }
+
+    // 設定中の「押下確認」: 選んだ候補の押下候補特性への通知(初期値を除く)で確定する。
     if setupAwaitingPress, peripheral === self.peripheral, setupPromise != nil {
-      confirmRegistration(peripheral)
+      if pressCharUUIDs.contains(characteristic.uuid), now > subscribeGraceUntil {
+        confirmRegistration(peripheral)
+      }
       return
     }
+
+    // 押下として確定したキャラクタリスティック以外の通知は無視する。
+    guard pressCharUUIDs.contains(characteristic.uuid) else { return }
+    // 購読直後の初期通知は押下ではない。
+    guard now > subscribeGraceUntil else { return }
 
     // 通常運用: 登録済みペリフェラルからの押下のみ有効。
     guard peripheral.identifier == registeredUUID() else { return }
