@@ -29,7 +29,7 @@ public class BleButtonModule: Module {
     Events("onPress", "onStateChanged")
 
     Constants([
-      "buildTag": "ble-4"
+      "buildTag": "ble-5"
     ])
 
     OnCreate {
@@ -106,6 +106,13 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
   // iTag系が使う事実上の標準サービス/キャラクタリスティック。
   private static let tagService = CBUUID(string: "FFE0")
   private static let tagCharacteristic = CBUUID(string: "FFE1")
+  // ボタン押下通知に使われる既知のキャラクタリスティック。
+  // FFE1=HM-10系の定番、FA01=WT-01等の独自型(実機で確認)。
+  // これらを持つ機器は「ほぼ確実にタグ」とみなし、優先的に確定処理へ進める。
+  private static let knownPressChars: Set<CBUUID> = [
+    CBUUID(string: "FFE1"),
+    CBUUID(string: "FA01"),
+  ]
   // HID(キーボード型)サービス。これを広告する機器はロック中に使えないので登録対象から除外。
   private static let hidService = CBUUID(string: "1812")
   // 「押下」以外の通知源になりうる既知のサービス(電池残量など)。
@@ -388,16 +395,19 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
 
   // 登録の確定は「実際にボタンが押された」ことを確認してから行う
   // (押下通知を持つ機器に接続できた後にのみ呼ばれる)。
-  private func beginConfirmPhase(_ peripheral: CBPeripheral) {
+  // isKnownTag: FFE1/FA01など既知のボタン特性を持つ=ほぼ確実にタグ。
+  // その場合は確認時間を長く(20秒)して、ユーザーが確実に押せるようにする。
+  private func beginConfirmPhase(_ peripheral: CBPeripheral, isKnownTag: Bool) {
     setupAwaitingPress = true
-    emitState("confirming", "接続しました。タグのボタンをもう1回押して確定してください")
+    let name = peripheral.name ?? "(無名の機器)"
+    emitState("confirming", "「\(name)」に接続。タグのボタンを1回押して確定してください")
     let work = DispatchWorkItem { [weak self] in
       guard let self, self.setupPromise != nil else { return }
       // この候補は押下が来なかった(=別の機器の可能性)。次の候補へ。
       self.tryNextSetupCandidate()
     }
     confirmTimeoutWork = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: work)
+    DispatchQueue.main.asyncAfter(deadline: .now() + (isKnownTag ? 20 : 12), execute: work)
   }
 
   private func confirmRegistration(_ peripheral: CBPeripheral) {
@@ -612,16 +622,31 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
   // (この判断をサービス単位でやると、電池残量など無関係な通知まで購読して
   //  しまい、ポケットの中で勝手に送信が始まる事故につながる)
   private func handleDiscoveryComplete(_ peripheral: CBPeripheral) {
-    let ffe1 = discoveredNotifyChars.filter { $0.char.uuid == Self.tagCharacteristic }
+    // 設定中: 接続後に判明した名前がApple機器(iPad/iPhone/Mac等)なら、
+    // タグではないので次の候補へ(広告に名前が無く除外できなかった分をここで弾く)。
+    if setupPromise != nil {
+      let n = (peripheral.name ?? "").lowercased()
+      for kw in ["macbook", "airpods", "iphone", "ipad", "apple watch", "imac", "beats", " watch"] {
+        if n.contains(kw) {
+          tryNextSetupCandidate()
+          return
+        }
+      }
+    }
+
+    // 既知のボタン特性(FFE1/FA01)を最優先。あれば「ほぼ確実にタグ」。
+    let known = discoveredNotifyChars.filter { Self.knownPressChars.contains($0.char.uuid) }
     let targets: [CBCharacteristic]
-    if !ffe1.isEmpty {
-      // 事実上の標準(FFE1)があればそれだけを購読する。
-      targets = ffe1.map { $0.char }
+    let isKnownTag: Bool
+    if !known.isEmpty {
+      targets = known.map { $0.char }
+      isKnownTag = true
     } else {
       // 亜種: 既知の「押下ではない」サービスを除いた通知だけを購読する。
       targets = discoveredNotifyChars
         .filter { !Self.excludedServices.contains($0.service) }
         .map { $0.char }
+      isKnownTag = false
     }
     guard !targets.isEmpty else {
       if setupPromise != nil {
@@ -646,7 +671,7 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
         .map { "\($0.service.uuidString)/\($0.char.uuid.uuidString)" }
         .joined(separator: ", ")
       emitState("debug", "通知特性[\(peripheral.name ?? "無名")]: \(list.isEmpty ? "なし" : list)")
-      beginConfirmPhase(peripheral)
+      beginConfirmPhase(peripheral, isKnownTag: isKnownTag)
     }
   }
 
