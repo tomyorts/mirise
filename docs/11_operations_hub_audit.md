@@ -1,884 +1,981 @@
 # 11 MIRISE Hub Operations 技術監査（実装前調査）
 
-本書は、既存リポジトリ `tomyorts/mirise` に **MIRISE Hub Operations**（総務・社長室・IT・施設運営・採用・広報・イベントの指示／進捗／成果物／承認／引継ぎの一元管理）を追加するための技術監査結果です。
+**監査対象**: MIRISE Hub 本体（`dental-clinic-app` / 本番 https://dentalhub.tokyo）
+**目的**: 総務・社長室・IT・施設運営・採用・広報・イベントの指示／進捗／成果物／承認／引継ぎを一元管理する **Operations 機能**を、最小侵襲で追加する
+**本書の段階ではコード変更を行っていません。** 記載のスキーマ・API・画面はすべて提案です。
 
-**本書の段階ではコード変更を行っていません。** 記載のスキーマ・API・画面はすべて提案であり、実装は作業計画（§10）に従って段階的に着手します。
+> **注記**: 本書は当初、別リポジトリ（`tomyorts/mirise` = MIRISE Intercom / 院内音声インカム）を対象に作成しましたが、実際の MIRISE Hub コードベースの提供を受けたため、全面的に書き直しています。Intercom は Hub とは独立した別アプリです。
 
 ---
 
-## 0. 最重要の前提確認
+## ⚠️ 0. 監査中に発見した緊急対応事項
 
-調査の結果、**「miriseHub」という名称のコードベースは本リポジトリに存在しません。**
-現存するのは **MIRISE Intercom MVP**（院内音声インカム）です。
+Operations の設計より先に対応が必要な事項です。**S-1 は即日対応を推奨します。**
 
-- `apps/web` … Next.js 製のインカム Web アプリ（Vercel `mirisevoicelink` で本番稼働中）
-- `apps/mobile` … Expo/React Native 製の iOS インカムアプリ（PTT・BLE ボタン対応）
-- 業務管理（タスク・承認・引継ぎ）に相当する機能は**一切存在しません**
+### S-1【最優先】本番の認証情報が平文で配布物に含まれている
 
-したがって本件は「既存 Hub への機能追加」ではなく、**インカム基盤の上に業務管理アプリを新規構築する**作業になります。再利用できるのは認証の土台・デプロイ経路・UI 資産までで、データモデルは新規です。以降はこの前提で記述します。
+提供された zip の `.project-config.json` に、以下が**平文で**含まれていました。
+
+| 種別 | 内容 |
+|---|---|
+| 本番 DB 接続文字列 | TiDB Cloud（ユーザー名・パスワード・ホスト・DB 名すべて） |
+| `JWT_SECRET` | **全ユーザーのセッション Cookie の署名鍵** |
+| `VAPID_PRIVATE_KEY` | Web Push の秘密鍵 |
+| クラウドストレージの認証情報 | アクセスキー・シークレット・セッショントークン |
+| 外部 API キー | LLM / ストレージ用（サーバー用・フロントエンド用の 2 種） |
+
+**リスク**: `JWT_SECRET` が漏れると、**任意のユーザーになりすましたセッション Cookie を第三者が自作できます**。ロール（`appRole`）は DB から引かれるため、なりすまし対象が TenantAdmin であれば全テナントデータにアクセスされます。DB 接続文字列は TiDB Cloud への直接接続を許します。
+
+**対応（推奨順）**:
+1. `JWT_SECRET` を再生成（全ユーザーが再ログインになりますが、これは必要なコストです）
+2. DB パスワードのローテーション
+3. VAPID 鍵ペアの再生成（既存の Push 購読は再登録が必要）
+4. ストレージ・LLM の API キーをローテーション
+5. DB のアクセスログを確認し、想定外の接続元がないか点検
+
+`.gitignore` には `.project-config.json` が含まれているためリポジトリには入っていませんが、**zip 配布・チャット添付・スクリーンショット経由での流出**が現実の経路です。今後この種のファイルを共有しない運用ルールが必要です。
+
+### S-2 マイナンバー・年金番号・銀行口座が平文保存されている
+
+`onboardingForms` テーブル（入職時フォーム）に以下が保存されています。
+
+- `myNumber`（本人のマイナンバー）／`dependents[].myNumber`（扶養家族のマイナンバー、最大 10 名分）
+- `pensionNumber`（基礎年金番号）、`employmentInsuranceNumber`（雇用保険番号）
+- `bankName` / `branchName` / `accountNumber` / `accountHolderName`（給与振込口座）
+- `resumeFiles`（履歴書）、`licenseFiles`（資格証明書）の保存先 URL
+
+スキーマには `// マイナンバー (encrypted at app level)` というコメントがありますが、**コードベース全体を検索した結果、暗号化処理は実装されていません**（`crypto` の使用箇所は LINE の HMAC 署名検証とトークン生成のみ）。UI 側も `<Input type="password">` による画面表示のマスクのみで、保存値は平文です。
+
+マイナンバーは番号法上の**特定個人情報**であり、通常の個人情報より厳格な安全管理措置（利用範囲の限定、アクセス制御、暗号化、廃棄手順）が求められます。Operations で採用（Recruitment）を扱う前に、この既存の穴を塞ぐ必要があります。
+
+### S-3 退職・無効化したユーザーがアクセスし続けられる
+
+- セッションは JWT（HS256）で **有効期限 1 年**（`ONE_YEAR_MS`）
+- `sdk.authenticateRequest()` は openId から DB のユーザーを引きますが、**`isActive` も `employmentStatus` も検証していません**
+- `isActive` を見ているのは `localAuth.login`（ログイン時）だけ
+
+つまり、管理画面でユーザーを無効化しても、**すでに発行済みのセッションは最大 1 年間有効なまま**です。退職者が私物端末からログインしたままなら、アクセスは継続します。引継ぎ（Handover）を扱う Operations では致命的です。
+
+### S-4 患者の医療情報が全ロールから閲覧できる
+
+`tenantProcedure` は「テナントに所属しているか」だけを検査し、`appRole` を一切見ません。以下の患者データがこの `tenantProcedure` で公開されています。
+
+| ルーター | 内容 | 使用中の権限 |
+|---|---|---|
+| `orthodonticPatients` | 矯正患者情報 | `tenantProcedure` 4 / `managerProcedure` 1 |
+| `invisalign` | インビザライン症例 | `tenantProcedure` 6 / `managerProcedure` 2 |
+| `lingual` | 裏側矯正症例 | `tenantProcedure` 5 / `managerProcedure` 2 |
+| `patientVideos` | 患者動画 | `tenantProcedure` 3 / `managerProcedure` 3 |
+| `phoneCallRecords` | 電話対応記録 | `tenantProcedure` 3 / `managerProcedure` 1 |
+
+`Viewer` ロール（最下位）でもこれらを読めます。要配慮個人情報を最小権限で扱えていません。
 
 ---
 
 ## 1. 現状アーキテクチャ
 
-### 1-1. リポジトリ構成
+### 1-1. 全体像
 
 ```
-mirise/
-├─ apps/web/        Next.js 15 App Router（本番: Vercel）
-├─ apps/mobile/     Expo 54 / React Native 0.81（iOS 中心、EAS Build）
-├─ infra/livekit/   ローカル検証用 LiveKit の docker compose
-├─ docs/            00〜10 の設計・運用ドキュメント
-├─ prompts/         生成AI向けプロンプト
-└─ scripts/         LiveKit 鍵生成スクリプト
+ブラウザ / PWA（iOS Safari・Android Chrome・PC）
+  │  HTTPS
+  ▼
+Express 4（単一プロセス、Cloud Run 上）
+  ├─ /api/trpc/*          tRPC v11（appRouter：約 90 ルーター）
+  ├─ /api/oauth/callback  OAuth コールバック（Manus OAuth）
+  ├─ /api/upload/*        multer によるファイル/チャンクアップロード
+  ├─ /api/line/webhook    LINE Messaging API
+  ├─ /api/stripe/webhook  Stripe（課金）
+  ├─ /api/scheduled/*     Heartbeat（プラットフォームからの HTTP cron）
+  └─ 静的配信 or Vite（開発時）
+  │
+  ├─▶ MySQL（TiDB Cloud, us-east-1）… Drizzle ORM / 100 テーブル / 68 マイグレーション
+  ├─▶ ストレージプロキシ（Forge）… 画像・動画・書類
+  ├─▶ LLM API（Forge）… AI コンシェルジュ・音声/動画文字起こし
+  ├─▶ Web Push（VAPID）／LINE Messaging／メール（Resend・nodemailer）
+  └─▶ Stripe（サブスクリプション課金）
 ```
 
-monorepo 風ですが **npm workspaces / turborepo 等のワークスペース定義はなく**、`apps/web` と `apps/mobile` がそれぞれ独立した npm プロジェクトです。ルートに `package.json` はありません。
+規模: TypeScript/TSX **約 87,700 行**（`server` / `shared` / `client/src`）。`server/routers.ts` 単体で 5,058 行。
 
 ### 1-2. 調査項目 1: フレームワーク・言語・主要ライブラリ
 
 | 領域 | 内容 |
 |---|---|
-| Web | Next.js `^15`（App Router）、React `^19`、TypeScript `^5.8`（`strict: true`） |
-| モバイル | Expo `~54`、React Native `0.81.5`、Swift 製カスタムネイティブモジュール 3 種（`ble-button` / `ptt-channel` / `remote-ptt`、いずれも iOS のみ） |
-| 通信 | `livekit-client` / `livekit-server-sdk` / `@livekit/react-native` |
-| バリデーション | `zod ^3.25`（API ルートで使用） |
-| データ | `@upstash/redis ^1.38` |
-| スタイル | **素の CSS 1 ファイル**（`app/globals.css` 524 行、手書きクラス名）。CSS フレームワーク・UI ライブラリ・デザインシステムなし |
-| 状態管理 | React `useState` のみ。データフェッチライブラリ（SWR / TanStack Query）なし |
-| 認証ライブラリ | **なし**（自前 HMAC 実装） |
-| ORM | **なし** |
-| テスト | **なし** |
+| 言語 | TypeScript 5.9.3（`strict` 有効）、ESM |
+| フロント | React 19.2、**Vite 7**、**wouter**（ルーター、パッチ適用あり）、TanStack Query 5 |
+| UI | **Tailwind CSS 4** + **shadcn/ui**（Radix UI 25 コンポーネント）、framer-motion、recharts、dnd-kit |
+| API | **tRPC v11**（`superjson` トランスフォーマ）+ Express 4 |
+| DB | **Drizzle ORM 0.44** + `mysql2`。マイグレーションは `drizzle-kit` |
+| 検証 | **zod 4** |
+| 認証 | `jose`（JWT）+ `bcryptjs`（パスワード） |
+| 国際化 | **i18next / react-i18next**（`ja.json` / `en.json`） |
+| 通知 | `web-push`（VAPID）、LINE Messaging API、`resend` / `nodemailer` |
+| 課金 | `stripe` / `@stripe/stripe-js` |
+| ファイル | `multer`、`@aws-sdk/client-s3` + `s3-request-presigner`、`browser-image-compression` |
+| テスト | **vitest**（`server/**/*.test.ts`） |
+| パッケージ管理 | **pnpm 10** |
 
 ### 1-3. 調査項目 2: 認証方式
 
-`apps/web/app/lib/auth.ts` に自前実装。
+**2 系統のログインが併存**します。
 
-- **共通パスワード方式**。個人アカウントは存在しない
-  - `CLINIC_PASSWORD` に一致 → `role: "staff"`
-  - `ADMIN_PASSWORD` に一致 → `role: "admin"`
-- 認証成功で `{ role, exp }` を JSON 化 → base64url → **HMAC-SHA256（`AUTH_SECRET`）で署名**した文字列を Cookie `mirise_session` に格納
-- Cookie 属性: `httpOnly`、`sameSite: lax`、`secure`（本番のみ）、有効期限 **12 時間**
-- Web Crypto API を使うため Edge Middleware でも Node ランタイムでも検証可能
-- パスワード比較は `safeEqual()`（長さ一致前提の定数時間比較）
-- ネイティブアプリ向けの抜け道として `x-intercom-key` ヘッダー（`INTERCOM_API_KEY`）でも `/api/token` を許可
+**(A) ローカル認証（メール + パスワード）** — 実運用の主経路
+- `localAuth.login`: メールで `users` を引き、`bcrypt.compare` で照合
+- 成功時に JWT（HS256、`{ openId, appId, name }`、**有効期限 1 年**）を発行し、Cookie `app_session_id` に格納
+- `mustChangePassword` による初回強制変更、招待トークン（`nanoid(48)`、1 時間有効）によるパスワードリセット
+- リセット要求はメール存在を秘匿する応答（enumeration 対策済み）
 
-**構造的な限界（Operations にそのまま持ち込めない点）**
+**(B) OAuth（Manus OAuth）**
+- `/api/oauth/callback` で code を交換 → ユーザー情報取得
+- **ホワイトリスト方式**: OAuth で得たメールが `users` に未登録なら `/login?error=not_registered` へ弾く（良い設計）
 
-| # | 事実 | Operations への影響 |
+**認可のミドルウェア階層**（`server/routers.ts` 冒頭）:
+
+```
+publicProcedure      … 認証不要（12 箇所）
+protectedProcedure   … ログイン必須（31 箇所）
+tenantProcedure      … + テナント所属必須（157 箇所）※ appRole は見ない
+staffProcedure       … + Staff 以上（127 箇所）
+managerProcedure     … + Manager 以上（87 箇所）
+adminProcedure       … + TenantAdmin 以上（75 箇所）
+```
+
+**構造的な問題**:
+
+| # | 事実 | 影響 |
 |---|---|---|
-| A1 | セッションに**ユーザー識別子が存在しない**（`role` と `exp` のみ） | 「主担当者 1 名」「変更履歴」「監査ログ」が原理的に成立しない。個人アカウント化が**前提条件** |
-| A2 | セッション失効機構がない。検証は HMAC と `exp` のみ | 退職者の即時無効化ができない |
-| A3 | `CLINIC_PASSWORD` を変更しても**既存セッションは無効化されない**（署名鍵は `AUTH_SECRET`）。docs/09 §2 の「退職者が出たら共通パスワードを変更」という運用は、最大 12 時間有効なセッションを残す | 人事情報を扱う画面では許容できない |
-| A4 | `/api/login` に**レート制限・ロックアウトがない** | ブルートフォース耐性なし |
-| A5 | ロールは `staff` / `admin` の 2 値のみ | 部署・機微区分の権限分離ができない |
+| A1 | セッション JWT に `isActive` / `employmentStatus` の検証がなく、失効機構もない（§S-3） | 退職者が最大 1 年アクセス可能 |
+| A2 | セッション TTL が 1 年 | 端末紛失時の露出期間が長い |
+| A3 | `localAuth.login` に**レート制限・ロックアウトがない** | ブルートフォース耐性なし |
+| A4 | `requireRole()` ヘルパーが定義されているが未使用（デッドコード） | 実装意図と実態の乖離 |
+| A5 | `_core/trpc.ts` の `adminProcedure`（`users.role === 'admin'` を見る旧系）と `routers.ts` の `adminProcedure`（`appRole` を見る新系）が**同名で併存** | 取り違えると認可が緩む |
 
 ### 1-4. 調査項目 3: ユーザー・部署・役割・権限構造
 
-- **ユーザー**: エンティティとして存在しない。Redis 上の `mirise:staff` に `{ name: string, role: string }` の配列があるのみ。`role` は自由記述（「歯科医師」等の職種文字列）で、権限とは無関係。ID もメールアドレスもない
-- **部署**: 概念が存在しない
-- **施設（医院）**: 概念が存在しない。ルーム（受付・診療室・オペ・滅菌・全体）が事実上の唯一の区分軸
-- **役割/権限**: `Role = "staff" | "admin"` の 2 値のみ。認可判定は 3 箇所に散在
-  - `middleware.ts` … `/admin` 配下を `role === "admin"` に制限
-  - `app/api/admin/route.ts` の `requireAdmin()`
-  - `app/api/config/route.ts` / `app/api/token/route.ts` … ログイン済みかどうかのみ
+- **ユーザー**: `users` テーブル。`openId`（ユニーク）、`email`、`tenantId`、`appRole`、`jobCategoryId`、`isActive`、`employmentStatus`（active/retired）、`passwordHash`、プライバシー同意（日時・バージョン・IP）
+- **テナント（医院）**: `tenants`。プラン、ブランディング（ロゴ・テーマ色・ログイン背景）、診療時間、メニュー構成、Stripe 契約情報
+- **部署**: `departments`（テナント配下）+ `userDepartments`（多対多）。既定は「矯正 / 口腔外科 / 衛生士 / 受付」
+- **職種**: `jobCategories`（別軸）
+- **役割**: `appRole` の 5 値
 
-**middleware の適用範囲に注意**：`matcher: ["/", "/admin", "/admin/:path*"]` であり **`/api/*` は対象外**です。API 保護は各ルートハンドラの自前チェックに依存しています。Operations の API を追加する際、この規約を知らずに実装すると**無防備なエンドポイントが生まれます**（§9 R3）。
+```ts
+ROLE_HIERARCHY = { SuperAdmin: 0, TenantAdmin: 1, Manager: 2, Staff: 3, Viewer: 4 }
+hasMinRole(userRole, requiredRole) => ROLE_HIERARCHY[userRole] <= ROLE_HIERARCHY[requiredRole]
+```
+
+**これは完全な一直線の階層です。** 上位ロールは下位ロールが見られるものをすべて見られます。結果として:
+
+- **職務分離（separation of duties）が表現できません。** 「IT 管理者はシステムを運用できるが人事情報は読めない」「人事担当は人事情報を読めるが医療情報は読めない」という Operations の必須要件は、この 1 次元モデルでは**表現不可能**です
+- 部署（`departments`）は所属の記録には使われていますが、**認可には使われていません**（`userDepartments` を見て絞り込む処理が認可経路にない）
+
+例外的に**唯一のリソース単位権限**が存在します:
+
+```
+calendarCategoryPermissions (categoryId × userId × canView / canEdit / grantedById)
+```
+
+カレンダーのカテゴリだけは、ユーザー単位の閲覧・編集権限を持てます。**これが Operations の権限モデルの雛形として最も近い既存実装**です。
 
 ### 1-5. 調査項目 4: データベースと ORM
 
-- **RDB なし。ORM なし。マイグレーション基盤なし。**
-- 唯一の永続化は **Upstash Redis（REST）** の 2 キー
-  - `mirise:rooms` … `IntercomRoom[]` を JSON 丸ごと `SET`
-  - `mirise:staff` … `StaffMember[]` を JSON 丸ごと `SET`
-- 読み取りは失敗時に既定値へフォールバック（`getRooms()` は `INTERCOM_ROOMS` 定数へ）
-- 書き込みは**全置換**。楽観ロック・バージョン・更新者・更新時刻を持たない（管理画面の CSV 取り込みも全置換仕様）
-- Redis 未設定でもアプリは初期値で動作する設計
+- **MySQL（TiDB Cloud）+ Drizzle ORM**。`drizzle/schema.ts` に **100 テーブル**、`drizzle/` に **68 個のマイグレーション**（`0000` 〜 `0067`）
+- マイグレーション運用は `pnpm db:push`（`drizzle-kit generate && drizzle-kit migrate`）
+- 主要テーブル群:
 
-→ 業務データ（リレーション・履歴・権限行制御・集計）を載せる器としては不適格です。**Operations には別途 RDB が必須**です。
+| 分類 | テーブル |
+|---|---|
+| 組織 | `users` `tenants` `departments` `userDepartments` `jobCategories` |
+| 情報共有 | `posts` `comments` `reactions` `hashtags` `postReads` `postConfirmations` `categories` |
+| マニュアル | `manuals` `manualArticles` `articleVersions` `articleMedia` `articleReads` `quizzes` |
+| **タスク** | `tasks` |
+| 勤怠・シフト | `shifts` `shiftTypes` `shiftRequests` `attendanceRecords` `breakRecords` `timecardCorrections` `overtimeRequests` `paidLeave*`（3） |
+| 申請・承認 | `leaveRequests` `transportExpenses` `commuterPasses` `fieldWorkRecords` `purchaseOrders` |
+| カレンダー | `calendarEvents` `calendarCategories` `calendarCategoryPermissions` `calendarAuditLogs` `googleCalendarSyncs` `dutyCategories` `dutyAssignments` |
+| 書類・物品 | `documents` `documentFolders` `attachmentTemplates` `mailItems` `receivedGifts` `invoices` `inventoryItems` `inventoryTransactions` |
+| 患者（医療） | `orthodonticPatients` `invisalignCases` `lingualCases` `whitespotPatients` `patientVideos` `phoneCallRecords` `dhNotes` `operationWaitlist` `labWorks` `repairs` |
+| 人事 | `onboardingForms` `staffEvaluations` `userProfiles` |
+| 基盤 | `auditLogs` `notifications` `notificationSettings` `pushSubscriptions` `lineUsers` `storageUsage` `uploadSessions` `masterData` |
+
+**`tasks` テーブルの現状**（Operations の出発点）:
+
+```ts
+tasks {
+  id, tenantId, title, description,
+  creatorId,  assigneeId,          // ← nullable（担当者なしを許す）
+  status: "Todo" | "InProgress" | "Done" | "Reverted",
+  priority: "Low" | "Medium" | "High",
+  dueDate,                          // ← nullable
+  relatedPostId, relatedArticleId,
+  createdAt, updatedAt
+}
+```
+
+Operations の必須設計に対する不足は明確です:
+
+| 必須設計 | 現状 |
+|---|---|
+| 主担当者 1 名 | `assigneeId` は nullable。未割当タスクが作れる |
+| 期限の必須化 | `dueDate` は nullable |
+| 完了条件の必須化 | **列が存在しない** |
+| 対応中は次の行動・次回更新日 | **列が存在しない** |
+| 全変更履歴 | `auditLogs` に CREATE/UPDATE/DELETE の 3 件のみ記録。`details` は差分の一部（変更後の値のみ） |
+| 種別（Decision / Incident 等） | **列が存在しない**。Task 一種のみ |
+| 機微区分 | **列が存在しない** |
 
 ### 1-6. 調査項目 5: カレンダー・ファイル・通知の既存機能
 
-| 機能 | 現状 |
-|---|---|
-| カレンダー | **なし**。日時の概念自体がコードに存在しない（セッション `exp` を除く） |
-| ファイル | **なし**。ストレージ連携なし。管理画面の CSV は `FileReader` でブラウザ内読み取りするのみでアップロードしない |
-| 通知 | **なし**。Web Push / メール / Slack / LINE いずれも未接続。`console.error` のみ |
-| リアルタイム | LiveKit のデータチャネル（`canPublishData: true`）が有効。音声用途だが、将来の即時通知に転用余地あり |
+**いずれも実装済みで、そのまま再利用できます。**
+
+**カレンダー**（`calendarEvents` ほか 6 テーブル）
+- 終日／時刻指定、複数日、色分け、カテゴリ、係（duty）割当
+- **繰り返し**（日／週／月／年、N 間隔、第 N 週の曜日、除外日リスト、無期限可）。`client/src/lib/recurrence.ts` に展開ロジック
+- **開始前通知**（`notifyMinutesBefore`）
+- **カテゴリ単位のユーザー権限**（`calendarCategoryPermissions`）
+- **変更履歴**（`calendarAuditLogs`：old/new の差分 JSON、削除後も参照できるようタイトル・日付を非正規化保持）
+- Google カレンダー双方向同期（`googleCalendarSyncs`、sync token による増分同期）
+- 日本の祝日（`client/src/lib/japaneseHolidays.ts`）
+
+**ファイル**
+- `documents` / `documentFolders`（階層フォルダ、並び順、**フォルダ単位のパスワードロック**＝bcrypt ハッシュ）
+- アップロードは `/api/upload/*`（multer）。大容量はチャンク分割 → `uploadSessions` で進捗管理 → サーバー側で結合
+- 保存先はストレージプロキシ。`storagePut()` が返す URL を DB に**永続保存**（`documents.fileUrl`、`onboardingForms.resumeFiles[].url` など）
+- 画像はクライアント側で圧縮（`browser-image-compression`）、動画も圧縮（`lib/videoCompressor.ts`）
+- 容量管理（`storageUsage` / `storageAlertSettings` / StorageDashboard 画面）
+
+**通知**（4 チャネル）
+1. アプリ内（`notifications` テーブル、未読カウント、リンク付き）
+2. **Web Push**（VAPID、`pushSubscriptions`、`server/pushService.ts`）
+3. **LINE Messaging API**（`lineUsers` で連携、`server/lineMessaging.ts`、Webhook 受信あり）
+4. メール（Resend / nodemailer）
+
+`notificationSettings` でユーザーごと・種別ごとに ON/OFF。`approvalNotifier.ts` が**承認・却下の通知を 3 チャネルへ同時配信**する既存パターンを持っています（Operations の承認通知はこれをそのまま使えます）。
 
 ### 1-7. 調査項目 6: モバイル / PWA 対応
 
-- **PWA 非対応**。`manifest.json` なし、Service Worker なし、`public/` は `mirise-logo.png` のみ、`layout.tsx` に viewport / theme-color / apple-mobile-web-app 系メタなし
-- レスポンシブ対応は CSS の `width: min(980px, calc(100% - 32px))` 程度。モバイル最適化された入力体系ではない
-- ネイティブアプリ（Expo）は存在するが**インカム専用**。画面は `App.tsx` 1 枚で、ナビゲーション（React Navigation / expo-router）を持たない
-- iOS のみ実装のネイティブモジュールがあるため、Android 版ネイティブは未成熟
+**PWA 対応済み**です。
 
-→ 「スマホで 30 秒以内に進捗更新」の要件は、**Web の PWA 化で満たすのが最短**（§10 Phase 3）。Expo アプリへの機能追加は BLE/PTT の既存コードと干渉するため推奨しません。
+- `client/public/manifest.json` と `client/public/sw.js` が存在
+- `PwaInstallPrompt.tsx`（ホーム画面追加の誘導）、`SafariBanner.tsx`（iOS Safari 固有の案内）
+- `hooks/useMobile.tsx` でレスポンシブ分岐、`MobileBackButton.tsx`
+- Tailwind によるレスポンシブ、`vaul`（モバイル用ドロワー）
+- iOS Safari が Cookie を送らない経路への対策として、**`Authorization: Bearer` ヘッダーでの認証**と 15 分間有効なアップロードトークン（`auth.getUploadToken`）を実装済み
+- 導入マニュアルにも「ホーム画面に追加してネイティブアプリのように使う」手順あり
+
+→ 「スマホで 30 秒以内に進捗更新」の土台は**すでに整っています**。必要なのは専用の軽量 UI と API だけです。
 
 ### 1-8. 調査項目 7: 監査ログ
 
-**存在しません。** 認証成否、管理画面での設定変更、トークン発行のいずれも記録されていません（`console.error` によるエラー出力のみ、Vercel のランタイムログに残るが構造化されておらず検索・保全に耐えない）。
+**2 系統存在します。**
 
-さらに §1-3 A1 の通り**行為者を特定する情報がない**ため、現状の認証のままでは監査ログを実装しても意味を持ちません。
+**(A) 汎用 `auditLogs`**
+```ts
+auditLogs { id, tenantId, userId, userName, action, targetEntity, targetId, details(JSON), createdAt }
+action: "CREATE" | "READ" | "UPDATE" | "DELETE" | "LOGIN" | "LOGOUT"
+```
+`server/routers.ts` の `audit()` ヘルパー経由で **82 箇所**から記録。閲覧画面は `/admin/audit-logs`（`AdminAuditLogs.tsx`）。
+
+**(B) `calendarAuditLogs`** — カレンダー専用。old/new の差分を保持する、より精密な設計。
+
+**不足点**:
+
+| # | 内容 |
+|---|---|
+| B1 | **`READ` が実質使われていません。** 患者情報・人事情報の**閲覧**は記録されていません（要配慮個人情報の取扱記録として不十分） |
+| B2 | 記録対象に大きな欠落: `Attendance` `LeaveRequest` `Document` `StaffEvaluation` `Patient*` `PatientVideo` `PhoneCall` `Shift` に対する `audit()` 呼び出しがありません |
+| B3 | `details` は**変更後の値のみ**。変更前が残らないため「何がどう変わったか」を復元できません（カレンダーだけは old/new を持つ） |
+| B4 | `auditLogs` は通常テーブルで、**アプリの DB ユーザーが UPDATE / DELETE できます**。改ざん耐性がありません |
+| B5 | ログイン成功・失敗の記録がありません（`LOGIN` enum は定義済みだが未使用） |
 
 ### 1-9. 調査項目 8: 現在のデプロイ方法
 
-```
-GitHub tomyorts/mirise (main) ──自動──▶ Vercel プロジェクト mirisevoicelink
-                                          └─ https://mirisevoicelink.vercel.app
-外部依存: LiveKit Cloud（音声SFU）/ Upstash Redis 東京（設定保存）
-```
-
-- `apps/web/vercel.json` の `ignoreCommand: "git diff --quiet HEAD^ HEAD ."` により、`apps/web` に差分がないコミットではビルドをスキップ
-- **CI が存在しない**（`.github/` ディレクトリなし）。lint も型チェックもテストも自動実行されない。品質ゲートは Vercel のビルド成功のみ
-- ロールバックは Vercel Deployments の Promote 操作（docs/09 §5）
-- 環境変数は Vercel の Environment Variables で管理（9 変数、docs/09 §4 に一覧）
-- モバイルは EAS Build（`eas.json` に development / preview / production の 3 プロファイル）
-- インフラは Vercel(Hobby) / LiveKit Cloud(Free) / Upstash(Free) の**無料枠**で運用中 → Operations 追加時は Vercel Pro 相当への移行検討が必要（後述 §10）
+- **ホスティング**: Manus プラットフォーム（**Cloud Run** 上）。本番 https://dentalhub.tokyo（代替 www）
+- **ソース管理**: GitHub ではなく **Manus の webdev git**（`s3://vida-prod-gitrepo/...`）
+- **ビルド**: `vite build && esbuild server/_core/index.ts --bundle --format=esm --outdir=dist` → `node dist/index.js`
+- **DB マイグレーション**: `pnpm db:push` を手動実行（デプロイパイプラインには組み込まれていない）
+- **定期実行**: プラットフォームの **Heartbeat**（HTTP cron が `/api/scheduled/*` を叩く）。`references/periodic-updates.md` に規約あり。**`setInterval` / `node-cron` は禁止**（Cloud Run がアイドルインスタンスを終了するため）
+  - ⚠️ ただし `server/_core/index.ts` は `startLabWorkReminderScheduler()` を**プロセス内で起動**しており、この規約に反しています（技工物リマインダーが不定期に止まる可能性）
+- **CI**: **なし**。lint / 型チェック / テストの自動実行なし。`pnpm check`（`tsc --noEmit`）と `pnpm test` は手動
+- **課金**: Stripe（`starter` / `standard` / `premium` + アドオン、トライアル期間あり）
 
 ### 1-10. 調査項目 9: テスト環境
 
-**存在しません。** テストランナー（Jest / Vitest）、E2E（Playwright / Cypress）、テストファイル、CI いずれも未整備。`.gitignore` に `coverage` の記載があるだけです。
+**整備済みです。**
+
+- **vitest**（`environment: node`、対象は `server/**/*.test.ts`）
+- **テストファイル 56 個、テストケース約 880 件**
+- カバー範囲は広く、以下が含まれます:
+  - `tenant-isolation.test.ts`（**テナント分離**）
+  - `calendar-permissions-audit.test.ts`（カレンダー権限・監査）
+  - `local-auth.test.ts` / `localAuth.test.ts` / `password-reset.test.ts` / `auth.logout.test.ts` / `oauth.test.ts`
+  - `superadmin.test.ts` / `superadmin-users.test.ts` / `admin-features.test.ts`
+  - `shifts.test.ts` / `attendance-*.test.ts`（3）/ `staffEval.test.ts` / `surveys.test.ts` / `push.test.ts` ほか
+
+**不足**: E2E（Playwright 等）なし、クライアント側テストなし、CI での自動実行なし。
 
 ### 1-11. 調査項目 10: Operations を最小侵襲で追加する方法（結論）
 
-**同一 Next.js アプリ内に Route Group で分離し、データ層とデプロイ判定は完全に別系統にする**方針を推奨します。
+**結論: 既存の `tasks` を拡張するのではなく、`workItems` という新しいドメインを並置し、既存機能を「呼び出して使う」構成にします。**
+
+理由:
+- `tasks` は既存画面（Tasks / TaskDetail / CreateTask / AI コンシェルジュの文脈 / Home ウィジェット）から使われており、必須列（期限・完了条件）を後から `NOT NULL` にすると**既存データが移行できず、既存画面が壊れます**
+- Operations は 10 種の Work Item を扱い、機微区分・承認・引継ぎを持つため、`tasks` の粒度とは要求が異なります
+
+**追加する範囲**:
 
 ```
-apps/web/
-├─ app/
-│  ├─ (intercom)/          ← 既存。ファイル移動はせず現状維持でも可
-│  │   page.tsx  admin/  login/
-│  ├─ ops/                 ← 追加。Operations の全画面
-│  ├─ api/
-│  │   ├─ token|config|admin|login|logout   ← 既存。触らない
-│  │   └─ ops/             ← 追加。Operations の全 API
-│  └─ lib/
-│      ├─ auth.ts store.ts rooms.ts         ← 既存。auth.ts のみ後方互換で拡張
-│      └─ ops/             ← 追加。db / schema / permissions / events / reports
-└─ middleware.ts           ← matcher に /ops を追加（1 行）
+drizzle/schema.ts        末尾に workItems 関連 10 テーブルを追記（既存テーブルは変更しない）
+drizzle/0068_*.sql       新規マイグレーション（追加のみ、破壊的変更なし）
+server/ops/              新規ディレクトリ
+  ├─ permissions.ts      権限判定の単一関数（新モデル）
+  ├─ router.ts           tRPC ルーター（appRouter に 1 行追加）
+  ├─ events.ts           変更履歴の記録
+  └─ reports.ts          日報・週報・月報の集計
+server/ops/*.test.ts     vitest（既存の書式を踏襲）
+client/src/pages/ops/    新規画面
+shared/opsTypes.ts       共有型
 ```
 
-最小侵襲を成立させる 5 つの規約：
+**既存ファイルへの変更は 4 箇所のみ**:
+1. `server/routers.ts` … `appRouter` に `ops: opsRouter,` を 1 行追加
+2. `client/src/App.tsx` … `/ops/*` のルート追加
+3. `shared/menuConfig.ts` … `DEFAULT_MENU_ORDER` に Operations のメニューキーを追加
+4. `drizzle/schema.ts` … 末尾にテーブル定義を追記
 
-1. **既存ファイルの変更は 3 つだけ** — `middleware.ts` の matcher に `/ops/:path*` 追加、`lib/auth.ts` にセッション payload の後方互換拡張（`sub` / `ver` を optional 追加）、`package.json` への依存追加。既存インカムのロジックには触れない
-2. **データ層を分離** — Operations は Postgres。Upstash Redis は既存用途のまま残す（Operations 側ではレート制限・キャッシュに限定利用）
-3. **フィーチャーフラグ** — `OPS_ENABLED` 環境変数。false の場合 `/ops` と `/api/ops` は 404。本番投入前でも main にマージできる
-4. **セッションの二重運用** — 既存の共通パスワードセッション（`role` のみ）は `/ops` では**無効**として扱い、個人アカウントのセッション（`sub` を持つ）のみ通す。インカム側は従来通り動作する
-5. **デプロイ判定** — `vercel.json` の `ignoreCommand` は `apps/web` 単位のままで問題ないが、Operations 用に DB マイグレーションを走らせるビルドステップを追加する
-
-代替案（別 Vercel プロジェクト / 別リポジトリ）は、セッション Cookie のドメイン共有と運用者の管理対象増加のコストが上回るため非推奨です。
+さらに `tenants.settings`（既存の JSON 列）に `opsEnabled` フラグを置けば、**テナント単位で段階的に有効化**できます。既存テナントには何も見えません。
 
 ---
 
 ## 2. 再利用できる既存機能
 
-| 資産 | 場所 | 再利用の仕方 | 改修量 |
-|---|---|---|---|
-| HMAC セッション実装 | `lib/auth.ts` | `Session` 型に `sub`（ユーザーID）・`ver`（失効世代）を追加。`createSessionToken` / `verifySessionToken` の骨格はそのまま流用可 | 小 |
-| 定数時間比較 | `lib/auth.ts` `safeEqual()` | API キー・トークン比較にそのまま利用 | なし |
-| Middleware による経路保護 | `middleware.ts` | matcher に `/ops/:path*` を足すだけ。redirect ヘルパもそのまま | 極小 |
-| zod による入力検証パターン | `api/token`・`api/admin` | Operations の全 API で同じ書式を踏襲（`ZodError` → 400、日本語メッセージ） | なし（規約流用） |
-| Upstash Redis クライアント | `lib/store.ts` | ログイン試行のレート制限、通知の重複抑止、レポートのキャッシュに転用 | 小 |
-| スタッフ CSV 取り込み UI | `admin/AdminClient.tsx` | ユーザー初期投入（氏名・部署・メール）の画面としてほぼ流用可能 | 中 |
-| デザイン言語・ロゴ | `globals.css`・`public/mirise-logo.png` | `.shell` `.panel` `.hero` `.field` `.primary` 等のクラス命名と配色をそのまま継承し、Operations 画面の見た目を統一 | なし |
-| 日本語 UI 文言の作法 | 全画面 | 「〜してください」調、エラー文の粒度をそのまま踏襲 | なし |
-| Vercel デプロイ経路 | `vercel.json`・Vercel 設定 | 同一プロジェクトに相乗り。環境変数管理・ロールバック手順（docs/09 §5）をそのまま適用 | なし |
-| LiveKit データチャネル | `api/token` の `canPublishData` | Incident 発生時にインカム全体ルームへ即時通知する将来拡張の土台 | 大（将来） |
-| 運用ドキュメント体系 | `docs/` | Operations の運用手順を docs/12 以降に同じ体裁で追加 | なし |
+**Operations に必要な基盤の約 8 割が既存です。**
 
-**再利用できないもの**：`lib/store.ts` の全置換保存モデル、`StaffMember` 型、`Role` 2 値、`INTERCOM_ROOMS`。これらは Operations のデータモデルとは無関係です。
+| 必要なもの | 既存資産 | 再利用方法 | 追加実装 |
+|---|---|---|---|
+| ユーザー・組織 | `users` `tenants` `departments` `userDepartments` `jobCategories` | そのまま | なし |
+| 認証 | ローカル認証 + OAuth ホワイトリスト、JWT、bcrypt | そのまま（§S-3 の修正は必要） | 失効機構 |
+| API 基盤 | tRPC v11 + zod + superjson、6 段のミドルウェア | そのまま踏襲 | 機微区分用の新ミドルウェア |
+| **監査ログ** | `auditLogs` + `audit()` ヘルパー + 閲覧画面 | そのまま + 追記専用化 | READ 監査、old/new 差分 |
+| **通知 4 チャネル** | アプリ内 / Web Push / LINE / メール、`notificationSettings` | そのまま | なし |
+| **承認通知** | `approvalNotifier.notifyApprovalResult()` | **そのまま呼ぶだけ** | なし |
+| **承認フロー** | `leaveRequests` `overtimeRequests` `transportExpenses` `timecardCorrections` `purchaseOrders` の pending/approved/rejected パターン、`Applications.tsx` のタブ集約 UI | パターンを踏襲 | 汎用化 |
+| **カレンダー** | `calendarEvents` + 繰り返し + 事前通知 | Work Item の期限をカレンダーに載せる | 連携 1 箇所 |
+| **繰り返し** | `lib/recurrence.ts`、`shiftRecurrenceRules` | Routine Checklist の生成に流用 | なし |
+| **リソース単位権限** | `calendarCategoryPermissions`（categoryId × userId × canView/canEdit） | **権限モデルの雛形として最重要** | Operations 版を新規作成 |
+| **ファイル** | `documents` / チャンクアップロード / 圧縮 / 容量管理 | 成果物の添付にそのまま | 署名付き URL 化 |
+| **フォルダロック** | `documentFolders.passwordHash` | 機微書類の隔離に流用可 | なし |
+| UI | shadcn/ui 25 種、Tailwind 4、dnd-kit、recharts、sonner | そのまま | なし |
+| PWA | `manifest.json` / `sw.js` / インストール誘導 / iOS 対策 | そのまま | なし |
+| 国際化 | i18next（ja/en） | 新規文言を追加 | 文言のみ |
+| **テナント別メニュー** | `menuConfig` v2（ロール × メニューキーの表示制御） | Operations メニューを登録 | キー追加のみ |
+| **CSV 取込** | `CsvBulkImport.tsx` / `bulkImport` ルーター / `papaparse` | 既存業務の一括移行に流用 | なし |
+| **CSV 出力** | `lib/csvExport.ts` | レポート出力に流用 | なし |
+| テスト | vitest 56 ファイル / 880 ケース、`tenant-isolation.test.ts` の書式 | 同じ書式で追加 | Operations 用テスト |
+| マイグレーション | drizzle-kit（68 本の実績） | そのまま | 追加分のみ |
+
+**再利用しないもの**: `tasks` テーブル（§1-11 の理由）、`ROLE_HIERARCHY` の 1 次元階層（§4 で拡張）。
 
 ---
 
 ## 3. 追加 DB スキーマ
 
-### 3-1. 技術選定
+既存 `drizzle/schema.ts` の記法（`mysqlTable` / `mysqlEnum` / `index` / `uniqueIndex`）に合わせます。**既存テーブルは一切変更しません。**
 
-| 項目 | 推奨 | 理由 |
-|---|---|---|
-| DB | **Postgres（Neon または Supabase、東京リージョン）** | リレーション・部分索引・`CHECK` 制約・JSONB・行レベルセキュリティが必要。Vercel からの接続実績が厚い |
-| ORM | **Drizzle ORM** | Vercel の serverless 環境でコールドスタートが軽い。SQL に近く `CHECK` 制約や部分索引を宣言しやすい。TypeScript 型が自動導出され、既存の zod ベース検証と相性が良い（Prisma でも可だが、必須制約を DB 側に置く本設計とは Drizzle の方が噛み合う） |
-| マイグレーション | `drizzle-kit` によるファイルベース。CI でチェック、デプロイ前に適用 | |
-| ファイル実体 | **Vercel Blob** または S3 互換。DB にはメタデータのみ | |
+> MySQL 8 は `CHECK` 制約を実際に強制します（MySQL 5.7 は無視）。TiDB も 6.5 以降で対応。**必須設計を DB 側で担保できるかは TiDB のバージョン確認が前提条件**です（§10 の事前確認事項）。強制できない場合は、後述のアプリ層 2 重ガード＋整合性チェックのバッチで代替します。
 
-### 3-2. 中核の設計判断
+```ts
+// ─── Operations: Work Items ───
+export const workItems = mysqlTable("workItems", {
+  id: int("id").autoincrement().primaryKey(),
+  tenantId: int("tenantId").notNull(),
+  seq: int("seq").notNull(),                    // テナント内通番（OPS-000123 表示用）
 
-1. **Work Item は 1 テーブル + 型判別 + 型別詳細**
-   10 種の Work Item（Task / Decision / Review / Incident / Routine Checklist / Project Milestone / Handover / System・Account / Recruitment / Procurement）は、共通項（担当者・期限・完了条件・状態・履歴・承認）が 8 割を占めます。共通部分を `work_item` に置き、型固有の属性は `work_item_detail`（JSONB、型ごとに zod スキーマで検証）に分離します。10 テーブルに分けると横断一覧・横断レポート・権限判定が破綻します。
-2. **必須設計を DB の `CHECK` 制約で強制する**
-   アプリ層のバリデーションだけでは、バッチ投入や将来の別クライアントで抜けます。「主担当 1 名」「期限」「完了条件」「対応中なら次アクションと次回更新日」は列の `NOT NULL` と `CHECK` で担保します。
-3. **履歴は追記専用イベント列**
-   全変更を `work_item_event` に追記し、日報・週報・月報はこのイベント列からの**決定論的な集計**で生成します（生成 AI は使いません。§9 R11）。
-4. **機微区分は行の属性 + 参照テーブル分離の併用**
-   医療情報・人事情報は `sensitivity` 列で行に区分を持たせ、加えて Recruitment（人事）の個人詳細は別テーブル `recruitment_private` に隔離して、通常経路の `SELECT *` では絶対に混ざらないようにします。
-5. **秘密情報はスキーマ上に置き場所を作らない**
-   System/Account は**パスワード列を持ちません**。持つのは `secret_ref`（パスワードマネージャの項目 ID / URL）だけです。
+  type: mysqlEnum("workItemType", [
+    "task", "decision", "review", "incident", "routine_checklist",
+    "project_milestone", "handover", "system_account",
+    "recruitment", "procurement",
+  ]).notNull(),
 
-### 3-3. スキーマ（DDL スケッチ）
+  title: varchar("title", { length: 500 }).notNull(),
+  body: text("body"),
+
+  // 必須設計①: 主担当者は必ず 1 名（nullable にしない）
+  assigneeId: int("assigneeId").notNull(),
+  requesterId: int("requesterId").notNull(),
+  departmentId: int("departmentId").notNull(),
+
+  // 必須設計②: 期限と完了条件を必須化
+  dueAt: timestamp("dueAt").notNull(),
+  doneCriteria: text("doneCriteria").notNull(),
+
+  status: mysqlEnum("workItemStatus", [
+    "open", "in_progress", "waiting_decision", "waiting_other", "done", "cancelled",
+  ]).default("open").notNull(),
+  priority: mysqlEnum("workItemPriority", ["urgent", "high", "normal", "low"])
+    .default("normal").notNull(),
+
+  // 必須設計③: 対応中なら次の行動と次回更新日が必須
+  nextAction: text("nextAction"),
+  nextUpdateAt: timestamp("nextUpdateAt"),
+
+  // 必須設計⑦: 医療情報・人事情報の分離
+  sensitivity: mysqlEnum("workItemSensitivity", ["general", "medical", "hr"])
+    .default("general").notNull(),
+
+  completedAt: timestamp("completedAt"),
+  version: int("version").default(1).notNull(),  // 楽観ロック
+  createdById: int("createdById").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (t) => [
+  uniqueIndex("wi_tenant_seq_idx").on(t.tenantId, t.seq),
+  index("wi_assignee_idx").on(t.tenantId, t.assigneeId, t.status, t.dueAt),
+  index("wi_dept_idx").on(t.tenantId, t.departmentId, t.status),
+  index("wi_stale_idx").on(t.tenantId, t.nextUpdateAt),
+  index("wi_inbox_idx").on(t.tenantId, t.status, t.createdAt),
+  index("wi_sensitivity_idx").on(t.tenantId, t.sensitivity),
+]);
+```
+
+対応する SQL 側の制約（マイグレーションに手書きで追加）:
 
 ```sql
--- ============ 組織 ============
-CREATE TABLE facility (            -- 医院・拠点
-  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  code          text NOT NULL UNIQUE,          -- 'oiso' / 'minamiaoyama'
-  name          text NOT NULL,
-  is_active     boolean NOT NULL DEFAULT true,
-  created_at    timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE TABLE department (          -- 総務/社長室/IT/施設運営/採用/広報/イベント
-  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  code          text NOT NULL UNIQUE,          -- 'general_affairs' 等
-  name          text NOT NULL,
-  parent_id     uuid REFERENCES department(id),
-  is_active     boolean NOT NULL DEFAULT true
-);
-
-CREATE TABLE app_user (
-  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  email         citext NOT NULL UNIQUE,
-  display_name  text NOT NULL,
-  facility_id   uuid REFERENCES facility(id),
-  department_id uuid REFERENCES department(id),
-  status        text NOT NULL DEFAULT 'active'
-                CHECK (status IN ('active','suspended','retired')),
-  session_ver   integer NOT NULL DEFAULT 1,     -- 失効世代。+1 で全セッション無効化
-  created_at    timestamptz NOT NULL DEFAULT now(),
-  updated_at    timestamptz NOT NULL DEFAULT now()
-);
-
--- 役割はスコープ付きで複数持てる（部署マネージャは自部署のみ、等）
-CREATE TABLE user_role (
-  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id       uuid NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
-  role          text NOT NULL CHECK (role IN
-                  ('system_admin','executive','dept_manager','staff',
-                   'hr_officer','medical_officer','auditor','viewer')),
-  scope_department_id uuid REFERENCES department(id),   -- NULL = 全社
-  scope_facility_id   uuid REFERENCES facility(id),
-  granted_by    uuid REFERENCES app_user(id),
-  granted_at    timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (user_id, role, scope_department_id, scope_facility_id)
-);
-
--- ============ Work Item 本体 ============
-CREATE TABLE work_item (
-  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  seq           bigserial UNIQUE,               -- 人が読む番号 OPS-000123
-  type          text NOT NULL CHECK (type IN
-                  ('task','decision','review','incident','routine_checklist',
-                   'project_milestone','handover','system_account',
-                   'recruitment','procurement')),
-  title         text NOT NULL CHECK (length(btrim(title)) > 0),
-  body          text NOT NULL DEFAULT '',
-
-  -- 必須設計①: 主担当者は必ず 1 名（複数担当を許さない）
-  assignee_id   uuid NOT NULL REFERENCES app_user(id),
-  requester_id  uuid NOT NULL REFERENCES app_user(id),
-  department_id uuid NOT NULL REFERENCES department(id),
-  facility_id   uuid REFERENCES facility(id),
-
-  -- 必須設計②: 期限と完了条件は必須
-  due_at        timestamptz NOT NULL,
-  done_criteria text NOT NULL CHECK (length(btrim(done_criteria)) > 0),
-
-  status        text NOT NULL DEFAULT 'open' CHECK (status IN
-                  ('open','in_progress','waiting_decision','waiting_other',
-                   'done','cancelled')),
-  priority      text NOT NULL DEFAULT 'normal'
-                CHECK (priority IN ('urgent','high','normal','low')),
-
-  -- 必須設計③: 対応中なら次の行動と次回更新日が必須
-  next_action   text,
-  next_update_at timestamptz,
-  CONSTRAINT progress_requires_next CHECK (
+ALTER TABLE workItems
+  ADD CONSTRAINT wi_progress_requires_next CHECK (
     status NOT IN ('in_progress','waiting_other')
-    OR (next_action IS NOT NULL AND length(btrim(next_action)) > 0
-        AND next_update_at IS NOT NULL)
+    OR (nextAction IS NOT NULL AND TRIM(nextAction) <> '' AND nextUpdateAt IS NOT NULL)
   ),
-
-  -- 必須設計⑨: 機微区分（医療 / 人事 / 一般）
-  sensitivity   text NOT NULL DEFAULT 'general'
-                CHECK (sensitivity IN ('general','medical','hr')),
-
-  completed_at  timestamptz,
-  CONSTRAINT done_requires_completed_at CHECK (
-    (status = 'done') = (completed_at IS NOT NULL)
+  ADD CONSTRAINT wi_done_requires_completed CHECK (
+    (status = 'done') = (completedAt IS NOT NULL)
   ),
-
-  version       integer NOT NULL DEFAULT 1,     -- 楽観ロック
-  created_by    uuid NOT NULL REFERENCES app_user(id),
-  created_at    timestamptz NOT NULL DEFAULT now(),
-  updated_at    timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE INDEX work_item_my_open_idx
-  ON work_item (assignee_id, status, due_at)
-  WHERE status NOT IN ('done','cancelled');
-CREATE INDEX work_item_stale_idx
-  ON work_item (next_update_at)
-  WHERE status IN ('in_progress','waiting_other');
-CREATE INDEX work_item_dept_idx ON work_item (department_id, status, due_at);
-CREATE INDEX work_item_inbox_idx
-  ON work_item (created_at) WHERE status = 'waiting_decision';
-
--- 型固有の属性（zod で型別に検証してから格納）
-CREATE TABLE work_item_detail (
-  work_item_id  uuid PRIMARY KEY REFERENCES work_item(id) ON DELETE CASCADE,
-  data          jsonb NOT NULL DEFAULT '{}'::jsonb
-);
-
--- 共同作業者・閲覧者（主担当は work_item.assignee_id のみ。ここには入れない）
-CREATE TABLE work_item_watcher (
-  work_item_id  uuid NOT NULL REFERENCES work_item(id) ON DELETE CASCADE,
-  user_id       uuid NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
-  kind          text NOT NULL CHECK (kind IN ('collaborator','watcher')),
-  PRIMARY KEY (work_item_id, user_id)
-);
-
-CREATE TABLE work_item_link (      -- 親子・関連（Milestone ⊃ Task 等）
-  from_id uuid NOT NULL REFERENCES work_item(id) ON DELETE CASCADE,
-  to_id   uuid NOT NULL REFERENCES work_item(id) ON DELETE CASCADE,
-  kind    text NOT NULL CHECK (kind IN ('parent','blocks','relates','duplicates')),
-  PRIMARY KEY (from_id, to_id, kind),
-  CHECK (from_id <> to_id)
-);
-
--- ============ 履歴（追記専用）============
--- 必須設計⑤: 全変更履歴を保存。UPDATE/DELETE はアプリ用 DB ロールから剥奪する。
-CREATE TABLE work_item_event (
-  id            bigserial PRIMARY KEY,
-  work_item_id  uuid NOT NULL REFERENCES work_item(id) ON DELETE RESTRICT,
-  actor_id      uuid NOT NULL REFERENCES app_user(id),
-  kind          text NOT NULL CHECK (kind IN
-                  ('created','progress_update','status_changed','assignee_changed',
-                   'due_changed','comment','attachment_added','attachment_removed',
-                   'approval_requested','approved','rejected','handed_over',
-                   'checklist_run','reopened','cancelled')),
-  from_value    jsonb,
-  to_value      jsonb,
-  comment       text,
-  occurred_at   timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX work_item_event_report_idx ON work_item_event (occurred_at, actor_id);
-CREATE INDEX work_item_event_item_idx  ON work_item_event (work_item_id, occurred_at);
-
--- ============ 承認 / 経営判断 Inbox ============
--- 必須設計④: 経営判断待ちを専用 Inbox に出す（status='waiting_decision' と連動）
-CREATE TABLE approval_request (
-  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  work_item_id  uuid NOT NULL REFERENCES work_item(id) ON DELETE CASCADE,
-  requested_by  uuid NOT NULL REFERENCES app_user(id),
-  approver_id   uuid NOT NULL REFERENCES app_user(id),  -- 承認者も 1 名に固定
-  question      text NOT NULL,                          -- 何を判断してほしいか
-  options       jsonb NOT NULL DEFAULT '[]'::jsonb,     -- 選択肢と各案の影響
-  recommended   text,                                   -- 起案者の推奨案
-  deadline_at   timestamptz NOT NULL,
-  decision      text CHECK (decision IN ('approved','rejected','deferred')),
-  decision_note text,
-  decided_at    timestamptz,
-  decided_by    uuid REFERENCES app_user(id),
-  CONSTRAINT decision_consistency CHECK (
-    (decision IS NULL) = (decided_at IS NULL)
-    AND (decision IS NULL) = (decided_by IS NULL)
-  )
-);
-CREATE INDEX approval_pending_idx
-  ON approval_request (approver_id, deadline_at) WHERE decision IS NULL;
-
--- ============ 定型チェックリスト ============
-CREATE TABLE checklist_template (
-  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  name        text NOT NULL,
-  department_id uuid NOT NULL REFERENCES department(id),
-  facility_id uuid REFERENCES facility(id),
-  cadence     text NOT NULL CHECK (cadence IN ('daily','weekly','monthly','quarterly','yearly')),
-  items       jsonb NOT NULL,        -- [{ key, label, requires_note, requires_photo }]
-  default_assignee_id uuid REFERENCES app_user(id),
-  is_active   boolean NOT NULL DEFAULT true
-);
-
-CREATE TABLE checklist_run (        -- 実施 1 回分。work_item と 1:1 で紐づく
-  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  template_id  uuid NOT NULL REFERENCES checklist_template(id),
-  work_item_id uuid NOT NULL UNIQUE REFERENCES work_item(id) ON DELETE CASCADE,
-  period_key   text NOT NULL,        -- '2026-07-27' / '2026-W30' / '2026-07'
-  results      jsonb NOT NULL DEFAULT '{}'::jsonb,
-  UNIQUE (template_id, period_key)   -- 同一期間の二重生成を防ぐ
-);
-
--- ============ 引継ぎ ============
-CREATE TABLE handover (
-  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  work_item_id  uuid NOT NULL UNIQUE REFERENCES work_item(id) ON DELETE CASCADE,
-  from_user_id  uuid NOT NULL REFERENCES app_user(id),
-  to_user_id    uuid NOT NULL REFERENCES app_user(id),
-  effective_at  timestamptz NOT NULL,
-  scope_note    text NOT NULL,
-  accepted_at   timestamptz,          -- 受け手の受領確認
-  accepted_note text,
-  CHECK (from_user_id <> to_user_id)
-);
-
--- ============ システム / アカウント台帳 ============
--- 必須設計⑥: パスワード・秘密情報の列を作らない。参照先だけを持つ。
-CREATE TABLE system_account (
-  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  work_item_id  uuid NOT NULL UNIQUE REFERENCES work_item(id) ON DELETE CASCADE,
-  system_name   text NOT NULL,
-  vendor        text,
-  account_label text NOT NULL,        -- 'admin@…' 等の識別名（パスワードは不可）
-  secret_ref    text,                 -- パスワードマネージャの項目 URL/ID のみ
-  owner_user_id uuid NOT NULL REFERENCES app_user(id),
-  mfa_status    text CHECK (mfa_status IN ('enabled','disabled','not_supported')),
-  renewal_at    date,
-  monthly_cost_jpy integer
-);
-COMMENT ON COLUMN system_account.secret_ref IS
-  'パスワードマネージャ項目への参照のみ。パスワード・APIキー等の値を入れてはならない。';
-
--- ============ 採用（人事機微。通常経路から隔離）============
-CREATE TABLE recruitment_private (
-  work_item_id  uuid PRIMARY KEY REFERENCES work_item(id) ON DELETE CASCADE,
-  candidate_ref text NOT NULL,        -- 候補者は仮名/ID 参照。実名は原則ここのみ
-  stage         text NOT NULL CHECK (stage IN
-                  ('applied','screening','interview_1','interview_2','offer','joined','declined')),
-  source        text,
-  notes         text,                 -- 事実記録のみ。人物評価の自動生成は行わない
-  updated_at    timestamptz NOT NULL DEFAULT now()
-);
-
--- ============ 調達 ============
-CREATE TABLE procurement (
-  work_item_id  uuid PRIMARY KEY REFERENCES work_item(id) ON DELETE CASCADE,
-  vendor        text,
-  amount_jpy    bigint,
-  budget_code   text,
-  quote_ref     text,
-  contract_start date,
-  contract_end   date
-);
-
--- ============ 添付 ============
-CREATE TABLE attachment (
-  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  work_item_id  uuid NOT NULL REFERENCES work_item(id) ON DELETE CASCADE,
-  storage_key   text NOT NULL,        -- Blob/S3 のキー。公開 URL は保存しない
-  file_name     text NOT NULL,
-  content_type  text NOT NULL,
-  byte_size     bigint NOT NULL,
-  sha256        text NOT NULL,
-  sensitivity   text NOT NULL DEFAULT 'general'
-                CHECK (sensitivity IN ('general','medical','hr')),
-  uploaded_by   uuid NOT NULL REFERENCES app_user(id),
-  uploaded_at   timestamptz NOT NULL DEFAULT now()
-);
-
--- ============ 通知 ============
-CREATE TABLE notification (
-  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id      uuid NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
-  work_item_id uuid REFERENCES work_item(id) ON DELETE CASCADE,
-  kind         text NOT NULL,         -- 'assigned' / 'due_soon' / 'update_overdue' / 'approval'
-  title        text NOT NULL,         -- 本文に機微情報を載せない（§9 R10）
-  created_at   timestamptz NOT NULL DEFAULT now(),
-  read_at      timestamptz
-);
-CREATE INDEX notification_unread_idx ON notification (user_id, created_at) WHERE read_at IS NULL;
-
-CREATE TABLE push_subscription (     -- Web Push（PWA）
-  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id      uuid NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
-  endpoint     text NOT NULL UNIQUE,
-  p256dh       text NOT NULL,
-  auth         text NOT NULL,
-  created_at   timestamptz NOT NULL DEFAULT now()
-);
-
--- ============ レポート ============
-CREATE TABLE report_snapshot (       -- 日報/週報/月報の確定版（イベント列から生成）
-  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  kind         text NOT NULL CHECK (kind IN ('daily','weekly','monthly')),
-  period_key   text NOT NULL,
-  scope_kind   text NOT NULL CHECK (scope_kind IN ('user','department','company')),
-  scope_id     uuid,
-  payload      jsonb NOT NULL,        -- 集計結果（決定論的生成）
-  generated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (kind, period_key, scope_kind, scope_id)
-);
-
--- ============ 監査ログ（全操作。追記専用）============
-CREATE TABLE audit_log (
-  id           bigserial PRIMARY KEY,
-  actor_id     uuid REFERENCES app_user(id),
-  action       text NOT NULL,          -- 'login' / 'read_sensitive' / 'export' / 'role_granted' …
-  target_type  text,
-  target_id    text,
-  sensitivity  text,
-  ip_hash      text,                   -- 生 IP は保存しない
-  user_agent   text,
-  result       text NOT NULL CHECK (result IN ('success','denied','error')),
-  detail       jsonb,
-  prev_hash    text,                   -- 改ざん検知用ハッシュチェーン
-  row_hash     text,
-  occurred_at  timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX audit_log_actor_idx ON audit_log (actor_id, occurred_at);
-CREATE INDEX audit_log_action_idx ON audit_log (action, occurred_at);
+  ADD CONSTRAINT wi_done_criteria_not_blank CHECK (TRIM(doneCriteria) <> '');
 ```
 
-**追記専用の担保（マイグレーション最終段で実行）**
+```ts
+// 型固有の属性（型ごとに zod スキーマで検証してから格納）
+export const workItemDetails = mysqlTable("workItemDetails", {
+  workItemId: int("workItemId").primaryKey(),
+  data: json("data").$type<Record<string, any>>().notNull(),
+});
 
-```sql
-REVOKE UPDATE, DELETE, TRUNCATE ON work_item_event, audit_log FROM app_runtime;
-GRANT  INSERT, SELECT                ON work_item_event, audit_log TO app_runtime;
+// 共同作業者・ウォッチャー（主担当は workItems.assigneeId のみ。ここには入れない）
+export const workItemWatchers = mysqlTable("workItemWatchers", {
+  id: int("id").autoincrement().primaryKey(),
+  workItemId: int("workItemId").notNull(),
+  userId: int("userId").notNull(),
+  kind: mysqlEnum("watcherKind", ["collaborator", "watcher"]).notNull(),
+}, (t) => [uniqueIndex("wi_watcher_idx").on(t.workItemId, t.userId)]);
+
+// 関連（Milestone ⊃ Task など）
+export const workItemLinks = mysqlTable("workItemLinks", {
+  id: int("id").autoincrement().primaryKey(),
+  fromId: int("fromId").notNull(),
+  toId: int("toId").notNull(),
+  kind: mysqlEnum("linkKind", ["parent", "blocks", "relates", "duplicates"]).notNull(),
+}, (t) => [uniqueIndex("wi_link_idx").on(t.fromId, t.toId, t.kind)]);
+
+// ─── 必須設計⑤: 全変更履歴（追記専用）───
+// calendarAuditLogs と同じく old/new を保持する。日報・週報・月報はここから生成する。
+export const workItemEvents = mysqlTable("workItemEvents", {
+  id: bigint("id", { mode: "number" }).autoincrement().primaryKey(),
+  tenantId: int("tenantId").notNull(),
+  workItemId: int("workItemId").notNull(),
+  actorId: int("actorId").notNull(),
+  actorName: varchar("actorName", { length: 255 }).notNull(),  // 非正規化（退職後も参照可）
+  kind: mysqlEnum("eventKind", [
+    "created", "progress_update", "status_changed", "assignee_changed",
+    "due_changed", "comment", "attachment_added", "attachment_removed",
+    "approval_requested", "approved", "rejected", "deferred",
+    "handed_over", "handover_accepted", "checklist_run", "reopened", "cancelled",
+  ]).notNull(),
+  changes: text("changes"),          // JSON: { field: { old, new } }
+  comment: text("comment"),
+  occurredAt: timestamp("occurredAt").defaultNow().notNull(),
+}, (t) => [
+  index("wie_item_idx").on(t.workItemId, t.occurredAt),
+  index("wie_report_idx").on(t.tenantId, t.occurredAt, t.actorId),
+]);
+
+// ─── 必須設計④: 経営判断待ち Inbox ───
+export const workItemApprovals = mysqlTable("workItemApprovals", {
+  id: int("id").autoincrement().primaryKey(),
+  tenantId: int("tenantId").notNull(),
+  workItemId: int("workItemId").notNull(),
+  requestedById: int("requestedById").notNull(),
+  approverId: int("approverId").notNull(),        // 承認者も 1 名に固定
+  question: text("question").notNull(),           // 何を判断してほしいか
+  options: json("options").$type<{ label: string; impact: string }[]>(),
+  recommended: text("recommended"),               // 起案者の推奨案
+  deadlineAt: timestamp("deadlineAt").notNull(),
+  decision: mysqlEnum("approvalDecision", ["approved", "rejected", "deferred"]),
+  decisionNote: text("decisionNote"),
+  decidedById: int("decidedById"),
+  decidedAt: timestamp("decidedAt"),
+}, (t) => [
+  index("wia_pending_idx").on(t.tenantId, t.approverId, t.deadlineAt),
+]);
+
+// ─── 定型チェックリスト ───
+export const checklistTemplates = mysqlTable("checklistTemplates", {
+  id: int("id").autoincrement().primaryKey(),
+  tenantId: int("tenantId").notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  departmentId: int("departmentId").notNull(),
+  cadence: mysqlEnum("cadence", ["daily", "weekly", "monthly", "quarterly", "yearly"]).notNull(),
+  items: json("items").$type<{ key: string; label: string; requiresNote: boolean; requiresPhoto: boolean }[]>().notNull(),
+  defaultAssigneeId: int("defaultAssigneeId"),
+  isActive: boolean("isActive").default(true).notNull(),
+});
+
+export const checklistRuns = mysqlTable("checklistRuns", {
+  id: int("id").autoincrement().primaryKey(),
+  tenantId: int("tenantId").notNull(),
+  templateId: int("templateId").notNull(),
+  workItemId: int("workItemId").notNull(),
+  periodKey: varchar("periodKey", { length: 16 }).notNull(),  // 2026-07-28 / 2026-W30 / 2026-07
+  results: json("results").$type<Record<string, { checked: boolean; note?: string }>>(),
+}, (t) => [uniqueIndex("clr_period_idx").on(t.templateId, t.periodKey)]);  // 二重生成防止
+
+// ─── 引継ぎ ───
+export const workItemHandovers = mysqlTable("workItemHandovers", {
+  id: int("id").autoincrement().primaryKey(),
+  tenantId: int("tenantId").notNull(),
+  workItemId: int("workItemId").notNull(),
+  fromUserId: int("fromUserId").notNull(),
+  toUserId: int("toUserId").notNull(),
+  effectiveAt: timestamp("effectiveAt").notNull(),
+  scopeNote: text("scopeNote").notNull(),
+  acceptedAt: timestamp("acceptedAt"),        // 受け手の受領確認まで完了扱いにしない
+  acceptedNote: text("acceptedNote"),
+});
+
+// ─── 必須設計⑧: System/Account 台帳（パスワード列を作らない）───
+export const opsSystemAccounts = mysqlTable("opsSystemAccounts", {
+  id: int("id").autoincrement().primaryKey(),
+  tenantId: int("tenantId").notNull(),
+  workItemId: int("workItemId").notNull(),
+  systemName: varchar("systemName", { length: 255 }).notNull(),
+  vendor: varchar("vendor", { length: 255 }),
+  accountLabel: varchar("accountLabel", { length: 255 }).notNull(),
+  secretRef: varchar("secretRef", { length: 500 }),   // パスワードマネージャの項目 URL/ID のみ
+  ownerUserId: int("ownerUserId").notNull(),
+  mfaStatus: mysqlEnum("mfaStatus", ["enabled", "disabled", "not_supported"]),
+  renewalAt: varchar("renewalAt", { length: 10 }),
+  monthlyCostJpy: int("monthlyCostJpy"),
+});
+// ※ secretRef にはパスワード・API キーの値を入れない。保存前に検出して拒否する（§9 R6）。
+
+// ─── 添付（既存 documents とは別。Work Item 直付け）───
+export const workItemAttachments = mysqlTable("workItemAttachments", {
+  id: int("id").autoincrement().primaryKey(),
+  tenantId: int("tenantId").notNull(),
+  workItemId: int("workItemId").notNull(),
+  fileKey: text("fileKey").notNull(),          // 永続 URL ではなくキーを保存 → 都度署名付き URL を発行
+  fileName: varchar("fileName", { length: 255 }).notNull(),
+  mimeType: varchar("mimeType", { length: 100 }),
+  fileSize: int("fileSize"),
+  sensitivity: mysqlEnum("attachmentSensitivity", ["general", "medical", "hr"])
+    .default("general").notNull(),
+  uploadedById: int("uploadedById").notNull(),
+  uploadedAt: timestamp("uploadedAt").defaultNow().notNull(),
+});
+
+// ─── レポート確定版（イベント列から決定論的に生成）───
+export const opsReportSnapshots = mysqlTable("opsReportSnapshots", {
+  id: int("id").autoincrement().primaryKey(),
+  tenantId: int("tenantId").notNull(),
+  kind: mysqlEnum("reportKind", ["daily", "weekly", "monthly"]).notNull(),
+  periodKey: varchar("periodKey", { length: 16 }).notNull(),
+  scopeKind: mysqlEnum("scopeKind", ["user", "department", "tenant"]).notNull(),
+  scopeId: int("scopeId"),
+  payload: json("payload").notNull(),
+  generatedAt: timestamp("generatedAt").defaultNow().notNull(),
+}, (t) => [uniqueIndex("ors_idx").on(t.tenantId, t.kind, t.periodKey, t.scopeKind, t.scopeId)]);
+
+// ─── 権限付与（calendarCategoryPermissions と同型）───
+export const opsPermissions = mysqlTable("opsPermissions", {
+  id: int("id").autoincrement().primaryKey(),
+  tenantId: int("tenantId").notNull(),
+  userId: int("userId").notNull(),
+  capability: mysqlEnum("opsCapability", [
+    "ops_admin",        // Operations の設定管理
+    "ops_executive",    // 経営判断 Inbox の名宛人
+    "ops_dept_manager", // 部署スコープの管理
+    "ops_hr",           // sensitivity='hr' の閲覧・編集
+    "ops_medical",      // sensitivity='medical' の閲覧・編集
+    "ops_auditor",      // 全件読み取り + 監査ログ
+  ]).notNull(),
+  scopeDepartmentId: int("scopeDepartmentId"),   // null = テナント全体
+  grantedById: int("grantedById").notNull(),
+  grantedAt: timestamp("grantedAt").defaultNow().notNull(),
+}, (t) => [
+  uniqueIndex("opsperm_idx").on(t.tenantId, t.userId, t.capability, t.scopeDepartmentId),
+]);
 ```
 
-`work_item` の `UPDATE` に対しては、変更前後を `work_item_event` に自動記録する `AFTER UPDATE` トリガを併設し、アプリ側の書き漏れがあっても履歴が欠落しない構成にします。
-
-### 3-4. 必須設計との対応表
+### 必須設計との対応表
 
 | 必須設計 | 実現手段 |
 |---|---|
-| 1 件につき主担当者 1 名 | `work_item.assignee_id` を `NOT NULL` の単一列に。共同担当は `work_item_watcher` へ分離し、担当者としては扱わない |
-| 期限と完了条件を必須化 | `due_at NOT NULL` / `done_criteria NOT NULL` + 空白のみを禁じる `CHECK` |
-| 対応中は次の行動と次回更新日を必須 | `CHECK progress_requires_next`（`in_progress` / `waiting_other` で強制） |
-| 日報・週報・月報を更新履歴から自動生成 | `work_item_event` を期間・スコープで集計 → `report_snapshot`。**LLM は使わない決定論的集計** |
-| 経営判断待ちを専用 Inbox に表示 | `status='waiting_decision'` + `approval_request`（未決定）の部分索引。`/ops/inbox` から参照 |
-| 全変更履歴を保存 | `work_item_event` 追記専用 + DB 権限剥奪 + 更新トリガ |
-| 医療情報と人事情報の権限分離 | `work_item.sensitivity` による行制御 + 人事詳細を `recruitment_private` に物理分離 + 閲覧を `audit_log` に記録 |
-| 秘密情報を本文に保存しない | `system_account` にパスワード列を設けず `secret_ref` のみ。加えて API 層で秘密情報パターン検出（§9 R6） |
-| スマホで 30 秒以内に進捗更新 | 進捗更新に必要な列を `status` / `next_action` / `next_update_at` / コメントの 4 つに限定し、専用 API `PATCH /api/ops/items/:id/progress` 1 発で完結（§6） |
-| AI による人格評価・自動人事評価を行わない | スキーマに評価スコア列を作らない。`recruitment_private.notes` は事実記録用途に限定。レポート生成は集計のみ（§9 R11） |
+| 主担当者 1 名 | `assigneeId` を `notNull` の単一列に。共同担当は `workItemWatchers` へ分離 |
+| 期限と完了条件を必須化 | `dueAt` / `doneCriteria` を `notNull` + 空白禁止の `CHECK` |
+| 対応中は次の行動と次回更新日を必須 | `CHECK wi_progress_requires_next` + アプリ層の zod による 2 重ガード |
+| 日報・週報・月報を更新履歴から自動生成 | `workItemEvents` を期間・スコープで SQL 集計 → `opsReportSnapshots`。**LLM は使わない** |
+| 経営判断待ちを専用 Inbox に表示 | `status='waiting_decision'` + `workItemApprovals`（未決）。`wia_pending_idx` で高速化 |
+| 全変更履歴を保存 | `workItemEvents`（old/new 差分、追記専用、actorName を非正規化） |
+| 医療情報と人事情報の権限分離 | `sensitivity` 列 + `opsPermissions` の capability + 閲覧の監査記録（§4） |
+| パスワード・秘密情報を本文に保存しない | `opsSystemAccounts` にパスワード列を設けず `secretRef` のみ + 保存時の検出（§9 R6） |
+| スマホで 30 秒以内に進捗更新 | 更新対象を 4 項目に限定した専用 API 1 発（§6）+ 既存 PWA |
+| AI による人格評価・自動人事評価を行わない | レポート生成は SQL 集計のみ。評価スコア列を作らない。既存 AI コンシェルジュに Operations データを渡さない（§9 R11） |
 
 ---
 
 ## 4. 権限マトリクス
 
-### 4-1. 役割の定義
+### 4-1. 設計方針: 既存 `appRole` に「能力（capability）」を直交させる
 
-| 役割 | 想定 | スコープ |
-|---|---|---|
-| `system_admin` | IT 管理者 | 全社。ただし人事・医療の**内容**は既定で不可視（設定変更権限と閲覧権限を分離） |
-| `executive` | 社長・社長室 | 全社。経営判断 Inbox の名宛人 |
-| `dept_manager` | 各部門長（総務・IT・施設運営・採用・広報・イベント） | 自部署（`scope_department_id`） |
-| `staff` | 一般スタッフ | 自分が担当・起案・ウォッチする案件 |
-| `hr_officer` | 人事担当 | `sensitivity='hr'` の閲覧・編集 |
-| `medical_officer` | 医療情報責任者 | `sensitivity='medical'` の閲覧・編集 |
-| `auditor` | 監査 | 全件**読み取り専用** + 監査ログ閲覧 |
-| `viewer` | 外部委託等 | 明示的に共有された案件のみ閲覧 |
+既存の `ROLE_HIERARCHY` は一直線で職務分離を表現できません（§1-4）。既存ロールを壊さずに要件を満たすため、**既存の `appRole` を「基本権限」として残したまま、`opsPermissions` による capability を直交軸として追加**します。
 
-### 4-2. 操作 × 役割（一般案件 `sensitivity='general'`）
+```
+実効権限 = f( appRole（既存・階層）, opsPermissions（新規・直交）, sensitivity, 担当関係 )
+```
 
-| 操作 | system_admin | executive | dept_manager | staff | hr_officer | medical_officer | auditor | viewer |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| 案件作成 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| 自分の担当案件の閲覧 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | 共有分のみ |
-| 他人の案件の閲覧 | ✓ | ✓ | 自部署 | ウォッチ分のみ | ✗ | ✗ | ✓ | ✗ |
-| 進捗更新（次アクション等） | ✓ | ✓ | 自部署 | 自担当のみ | 自担当 | 自担当 | ✗ | ✗ |
-| 担当者の変更 | ✓ | ✓ | 自部署 | ✗ | ✗ | ✗ | ✗ | ✗ |
-| 期限・完了条件の変更 | ✓ | ✓ | 自部署 | 自担当（履歴必須） | 自担当 | 自担当 | ✗ | ✗ |
-| 承認依頼の起票 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| 承認・却下 | ✗※ | ✓ | 自部署案件 | ✗ | ✗ | ✗ | ✗ | ✗ |
-| 経営判断 Inbox の閲覧 | ✗ | ✓ | 自部署の起票分 | 自分の起票分 | ✗ | ✗ | ✓ | ✗ |
-| 案件のクローズ | ✓ | ✓ | 自部署 | 自担当 | 自担当 | 自担当 | ✗ | ✗ |
-| 案件の削除 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| CSV エクスポート | ✓ | ✓ | 自部署 | ✗ | 人事のみ | 医療のみ | ✓ | ✗ |
-| ユーザー・役割管理 | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| 監査ログ閲覧 | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
+これにより既存の全画面・全テスト（880 ケース）は無変更で動き続けます。
 
-※ `system_admin` に承認権限を与えないのは、権限付与者と承認者を分離するためです。両方が必要な人には `executive` を併せて付与します。
-※ **削除は全役割で不可**。取り消しは `status='cancelled'`（履歴が残る論理取消）で行います。
+### 4-2. 操作 × 主体（一般案件 `sensitivity='general'`）
 
-### 4-3. 機微区分 × 役割（閲覧可否）
+| 操作 | TenantAdmin | ops_executive | ops_dept_manager | Manager | Staff | ops_auditor | Viewer |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| 案件作成 | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
+| 自分の担当案件を閲覧 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 他人の案件を閲覧 | ✓ | ✓ | 自部署 | 自部署 | ウォッチ分のみ | ✓ | ✗ |
+| 進捗更新（次アクション等） | ✓ | ✓ | 自部署 | 自部署 | 自担当のみ | ✗ | ✗ |
+| 担当者の変更 | ✓ | ✓ | 自部署 | 自部署 | ✗ | ✗ | ✗ |
+| 期限・完了条件の変更 | ✓ | ✓ | 自部署 | 自部署 | 自担当（履歴必須） | ✗ | ✗ |
+| 承認依頼の起票 | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
+| **承認・却下** | ✗ ※1 | ✓ | 自部署案件 | ✗ | ✗ | ✗ | ✗ |
+| 経営判断 Inbox の閲覧 | ✗ | ✓ | 自部署の起票分 | 自分の起票分 | 自分の起票分 | ✓ | ✗ |
+| 案件のクローズ | ✓ | ✓ | 自部署 | 自部署 | 自担当 | ✗ | ✗ |
+| **案件の削除** | ✗ ※2 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| CSV エクスポート | ✓ | ✓ | 自部署 | ✗ | ✗ | ✓ | ✗ |
+| Operations の設定管理 | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| 監査ログ閲覧 | ✗ ※3 | ✓ | ✗ | ✗ | ✗ | ✓ | ✗ |
 
-| 区分 | system_admin | executive | dept_manager | staff | hr_officer | medical_officer | auditor | viewer |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| `general` | ✓ | ✓ | 自部署 | 自担当/ウォッチ | ✓ | ✓ | ✓ | 共有分 |
-| `hr`（人事・採用） | **✗** | ✓ | **✗** | 自担当のみ | ✓ | **✗** | ✓（記録あり） | ✗ |
-| `medical`（医療情報） | **✗** | **✗** | **✗** | 自担当のみ | **✗** | ✓ | ✓（記録あり） | ✗ |
+※1 権限を付与できる者が承認もできると相互牽制が働かないため、承認は `ops_executive` に限定します。両方必要な人には両方を明示付与します。
+※2 **削除は全主体で不可**。取り消しは `status='cancelled'`（履歴が残る論理取消）。
+※3 システムを運用できることと、記録を読めることを分離します。
 
-要点：
+### 4-3. 機微区分 × 主体（閲覧可否）
 
-- **`system_admin` は機微情報を読めません。** システムを運用できることと、人事・医療の内容を読めることを分離します
-- **`executive` も医療情報は既定で読めません。** 必要な場合は `medical_officer` を明示付与します
-- 機微区分の案件を閲覧すると、**閲覧そのものが `audit_log` に `read_sensitive` として記録**されます
-- 機微区分は作成後に**下げられません**（`medical`→`general` の変更を禁止）。上げる操作のみ許可し、変更は履歴に残ります
+| 区分 | TenantAdmin | ops_executive | ops_dept_manager | ops_hr | ops_medical | ops_auditor | Staff |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| `general` | ✓ | ✓ | 自部署 | ✓ | ✓ | ✓ | 自担当/ウォッチ |
+| `hr`（人事・採用） | **✗** | ✓ | **✗** | ✓ | **✗** | ✓（記録あり） | 自担当のみ |
+| `medical`（医療情報） | **✗** | **✗** | **✗** | **✗** | ✓ | ✓（記録あり） | 自担当のみ |
+
+要点:
+
+- **`TenantAdmin` は機微情報を読めません。** これは既存の一直線階層からの明確な変更点であり、Operations の必須要件（医療情報と人事情報の権限分離）を満たすための中核です
+- **`ops_executive` も医療情報は既定で読めません。** 必要なら `ops_medical` を明示付与します
+- 機微案件の閲覧は `auditLogs` に `READ` として記録します（既存の `action` enum に `READ` は定義済みで、ようやく本来の用途で使われます）
+- 機微区分は作成後に**下げられません**（`medical` → `general` を禁止）。上げる方向のみ許可し、変更は履歴に残します
 
 ### 4-4. 実装方式
 
-権限判定は `lib/ops/permissions.ts` の**単一の純粋関数**に集約します。
+権限判定は `server/ops/permissions.ts` の**単一の純粋関数**に集約します。
 
 ```ts
-can(actor: ActorContext, action: Action, resource: ResourceRef): PermissionResult
+export function canOps(
+  actor: { userId: number; tenantId: number; appRole: AppRole;
+           capabilities: OpsCapability[]; departmentIds: number[] },
+  action: OpsAction,
+  resource: { departmentId: number; assigneeId: number; requesterId: number;
+              sensitivity: Sensitivity; watcherIds: number[] }
+): { allowed: boolean; reason?: string }
 ```
 
-- API ルート・画面・エクスポートすべてがこの 1 関数を経由する
-- §4-2 / §4-3 の表をそのままテーブル駆動テストの入力にする（§8）
-- さらに DB 側の Row Level Security を二重防壁として設定し、アプリのバグが機微情報の漏えいに直結しない構成にします
+- tRPC のミドルウェア・画面・エクスポートのすべてがこの 1 関数を経由する
+- §4-2 / §4-3 の表を**そのままテーブル駆動テストの入力**にする（§8 T6）
+- 既存の `staffProcedure` / `managerProcedure` / `adminProcedure` は変更せず、Operations 専用に `opsProcedure` を追加する
 
 ---
 
 ## 5. 画面構成
 
-既存 `globals.css` のクラス体系（`.shell` `.panel` `.hero` `.field` `.primary` `.secondary`）を継承し、見た目をインカムと統一します。
+既存の `DashboardLayout` + shadcn/ui + i18next をそのまま使い、`client/src/pages/ops/` 配下に追加します。メニューは `shared/menuConfig.ts` の `DEFAULT_MENU_ORDER` に `nav.ops*` キーを追加し、**テナント単位・ロール単位で表示制御**できるようにします（既存の menuConfig v2 の仕組みをそのまま利用）。
 
-| パス | 画面 | 主な役割 | 備考 |
+| パス | 画面 | 対象 | 内容 |
 |---|---|---|---|
-| `/ops` | マイダッシュボード | 全員 | 「今日やること」「期限超過」「更新期限切れ」「自分待ちの承認」の 4 ブロック。初期表示は自分の案件のみ |
-| `/ops/inbox` | **経営判断 Inbox** | executive | 未決の `approval_request` を期限順に。1 件 = 論点・選択肢・推奨案・影響・期限。その場で承認/却下/保留 + 理由入力 |
-| `/ops/items` | 案件一覧 | 全員 | 部署 / 型 / 状態 / 担当 / 期限のフィルタ、保存ビュー。権限で自動的に絞り込み |
-| `/ops/items/new` | 新規作成 | 全員 | 型を選ぶと必須項目（期限・完了条件）が出る。型別項目は動的フォーム |
-| `/ops/items/[id]` | 案件詳細 | 権限に応じ | ヘッダ（担当1名・期限・完了条件・状態）＋ 進捗更新フォーム ＋ **全履歴タイムライン** ＋ 添付 ＋ 承認 |
-| `/ops/items/[id]/handover` | 引継ぎ | 担当者・上長 | 引継ぎ先・発効日・引継ぎ範囲。受け手の受領確認まで完了しない |
-| `/ops/checklists` | 定型チェックリスト | 担当部署 | 本日/今週の実施分。1 タップでチェック、備考は任意 |
-| `/ops/reports` | 日報・週報・月報 | 本人・上長・executive | 期間とスコープを選ぶと履歴から自動生成。人手の作文欄は「所感」1 つだけ |
-| `/ops/admin/users` | ユーザー・役割管理 | system_admin / executive | CSV 一括投入（既存 AdminClient の UI を流用）、退職処理（`session_ver` +1 で即時無効化） |
-| `/ops/admin/departments` | 部署・拠点管理 | system_admin | |
-| `/ops/admin/templates` | チェックリスト定義 | system_admin / dept_manager | |
-| `/ops/admin/audit` | 監査ログ閲覧 | auditor / executive | 期間・行為者・操作で検索。エクスポート操作自体も記録 |
+| `/ops` | マイダッシュボード | 全員 | 「今日やること」「期限超過」「更新期限切れ（`nextUpdateAt` 経過）」「自分待ちの承認」の 4 ブロック |
+| `/ops/inbox` | **経営判断 Inbox** | `ops_executive` | 未決の承認依頼を期限順に。1 件 = 論点・選択肢と各案の影響・推奨案・期限。その場で承認/却下/保留（理由必須） |
+| `/ops/items` | 案件一覧 | 全員 | 部署 / 型 / 状態 / 担当 / 期限 / 機微区分でフィルタ。保存ビュー。権限で自動絞り込み |
+| `/ops/items/new` | 新規作成 | 全員 | 型を選ぶと必須項目（期限・完了条件）が出る。型別項目は動的フォーム（`react-hook-form` + zod） |
+| `/ops/items/:id` | 案件詳細 | 権限に応じ | ヘッダ（担当1名・期限・完了条件・状態）／進捗更新／**全履歴タイムライン**／添付／承認／引継ぎ |
+| `/ops/checklists` | 定型チェックリスト | 担当部署 | 本日・今週の実施分。1 タップでチェック |
+| `/ops/reports` | 日報・週報・月報 | 本人・上長・executive | 期間とスコープを選ぶと履歴から自動生成。人手の記入欄は「所感」1 つだけ |
+| `/ops/admin/permissions` | Operations 権限管理 | TenantAdmin / executive | capability の付与・剥奪。`calendarCategoryPermissions` の管理 UI を踏襲 |
+| `/ops/admin/templates` | チェックリスト定義 | TenantAdmin / dept_manager | |
+| `/ops/admin/audit` | Operations 監査ログ | auditor / executive | 既存 `AdminAuditLogs.tsx` を Operations 用にフィルタ |
 
 ### スマホ 30 秒更新の設計（必須要件）
 
-`/ops` を PWA としてホーム画面に追加し、**進捗更新を 1 画面 4 操作**で完結させます。
+既存 PWA にそのまま乗るため、**新しいインストール手順は不要**です。
 
 ```
-① 通知/ホームから該当案件を開く      … 1 タップ
-② 状態を選ぶ（対応中/判断待ち/完了） … 1 タップ
-③ 次の行動を入れる                   … 定型候補 or 音声入力
-④ 次回更新日を選ぶ（今日/明日/今週末/日付） … 1 タップ
-   → 「更新」                         … 1 タップ
+① 通知（Web Push / LINE）から該当案件を開く   … 1 タップ
+② 状態を選ぶ（対応中 / 判断待ち / 完了）        … 1 タップ
+③ 次の行動を入れる                             … 定型候補から選択 or 音声入力
+④ 次回更新日を選ぶ（今日 / 明日 / 今週末 / 日付）… 1 タップ
+   →「更新」                                    … 1 タップ
 ```
 
-- 入力欄は上記 4 つに限定し、それ以外の項目は詳細画面へ退避
-- タップ領域は 44px 以上、片手操作を想定し操作系は画面下部に配置
+- 入力欄は 4 つに限定（`status` / `nextAction` / `nextUpdateAt` / 一言コメント）。それ以外は詳細画面へ退避
+- **音声入力は既存の `VoiceRecorder.tsx` + `voiceTranscription.ts` を流用可能**（ただし機微案件では外部送信の可否を要判断。§9 R7）
+- タップ領域 44px 以上、操作系は画面下部（既存 `vaul` ドロワーを使用）
 - オフライン時はローカルキューに積み、復帰時に**冪等キー付き**で再送
-- Web Push で「更新期限切れ」を本人に通知（通知本文は件名のみ、機微情報は載せない）
 
 ---
 
 ## 6. API 構成
 
-既存の作法（App Router の Route Handler、zod 検証、`ZodError` → 400 の日本語メッセージ）を踏襲します。すべて `/api/ops/*` 配下で、**各ハンドラの先頭で `requireOpsSession()` を必ず呼びます**（middleware は `/api` を保護しないため。§9 R3）。
+既存の tRPC 規約（zod 検証 / `TRPCError` / 日本語メッセージ / `audit()` 呼び出し）を踏襲し、`appRouter` に `ops` を 1 つ追加します。
 
-| メソッド・パス | 用途 | 権限 |
+```ts
+// server/routers.ts — 追加は 1 行
+export const appRouter = router({
+  system: systemRouter,
+  auth: router({ ... }),
+  // ... 既存 90 ルーター（無変更）
+  ops: opsRouter,        // ← これだけ
+});
+```
+
+`server/ops/router.ts` の構成:
+
+| プロシージャ | 用途 | 権限 |
 |---|---|---|
-| `POST /api/ops/auth/request-link` | ログイン用マジックリンク発行（レート制限付き） | 公開 |
-| `GET /api/ops/auth/callback` | リンク検証 → 個人セッション Cookie 発行 | 公開 |
-| `POST /api/ops/auth/logout` | ログアウト | 認証済 |
-| `GET /api/ops/me` | 自分の情報・保有ロール・機能フラグ | 認証済 |
-| `GET /api/ops/items` | 一覧（フィルタ・カーソルページング）。権限で自動絞り込み | 認証済 |
-| `POST /api/ops/items` | 作成。型別 zod スキーマで検証 | 認証済 |
-| `GET /api/ops/items/:id` | 詳細（履歴・添付・承認を含む） | `can(read)` |
-| `PATCH /api/ops/items/:id` | 一般編集（`If-Match` 相当の `version` 必須） | `can(update)` |
-| **`PATCH /api/ops/items/:id/progress`** | **30 秒更新専用**。`{ status, next_action, next_update_at, comment?, idempotency_key }` のみ受け付ける | `can(update)` |
-| `POST /api/ops/items/:id/handover` | 引継ぎ起票 | `can(update)` |
-| `POST /api/ops/items/:id/handover/accept` | 受領確認 | 受け手本人 |
-| `GET /api/ops/items/:id/events` | 変更履歴 | `can(read)` |
-| `POST /api/ops/items/:id/attachments` | 署名付きアップロード URL の発行 | `can(update)` |
-| `GET /api/ops/attachments/:id/url` | 短命（5 分）署名付きダウンロード URL。発行を監査記録 | `can(read)` |
-| `GET /api/ops/inbox` | 経営判断待ち一覧 | executive / 起票者 |
-| `POST /api/ops/approvals` | 承認依頼（案件を `waiting_decision` へ） | 認証済 |
-| `POST /api/ops/approvals/:id/decide` | 承認・却下・保留（理由必須） | 承認者本人 |
-| `GET /api/ops/checklists/today` | 本日実施分 | 認証済 |
-| `POST /api/ops/checklists/:runId/complete` | チェック結果の記録 | 担当者 |
-| `GET /api/ops/reports?kind=daily&period=…&scope=…` | 日報/週報/月報の取得（未生成なら即時生成） | 本人・上長・executive |
-| `POST /api/ops/reports/generate` | 定期生成（Vercel Cron から実行、内部トークン必須） | システム |
-| `GET /api/ops/export?…` | CSV 出力。件数上限・機微区分制限・監査記録あり | §4-2 準拠 |
-| `POST /api/ops/push/subscribe` | Web Push 購読登録 | 認証済 |
-| `GET /api/ops/admin/users` ほか | 管理系 CRUD | system_admin / executive |
-| `GET /api/ops/admin/audit` | 監査ログ検索 | auditor / executive |
+| `ops.items.list` | 一覧（フィルタ・カーソルページング）。権限で自動絞り込み | `opsProcedure` |
+| `ops.items.create` | 作成。型別 zod スキーマで検証。必須 4 項目を強制 | `opsProcedure` |
+| `ops.items.getById` | 詳細（履歴・添付・承認を含む）。機微なら `READ` 監査 | `canOps(read)` |
+| `ops.items.update` | 一般編集（`version` 必須、不一致は 409 相当） | `canOps(update)` |
+| **`ops.items.updateProgress`** | **30 秒更新専用**。`{ id, version, status, nextAction, nextUpdateAt, comment?, idempotencyKey }` のみ | `canOps(update)` |
+| `ops.items.cancel` | 論理取消（削除は提供しない） | `canOps(update)` |
+| `ops.items.events` | 変更履歴 | `canOps(read)` |
+| `ops.handover.request` / `.accept` | 引継ぎ起票 / 受領確認 | 担当者 / 受け手本人 |
+| `ops.attachments.getUploadUrl` / `.getDownloadUrl` | 署名付き URL 発行（短命）。発行を監査記録 | `canOps(read/update)` |
+| `ops.approvals.request` | 承認依頼（案件を `waiting_decision` へ） | `opsProcedure` |
+| `ops.approvals.decide` | 承認・却下・保留（理由必須）→ `approvalNotifier` で 3 チャネル通知 | 承認者本人 |
+| `ops.inbox.list` | 経営判断待ち一覧 | `ops_executive` / 起票者 |
+| `ops.checklists.today` / `.complete` | 本日実施分 / 結果記録 | 担当者 |
+| `ops.reports.get` | 日報/週報/月報（未生成なら即時生成） | 本人・上長・executive |
+| `ops.permissions.list` / `.grant` / `.revoke` | capability 管理 | TenantAdmin / executive |
+| `ops.export.csv` | CSV 出力（件数上限・機微除外・監査記録） | §4-2 準拠 |
 
-共通規約：
+`/api/scheduled/opsDaily`（Heartbeat）で日次バッチを実行:
+- 更新期限切れ（`nextUpdateAt < now`）の担当者へ通知
+- 期限接近の通知
+- 定型チェックリストの当日分を生成
+- 日報スナップショットの確定
 
-- **冪等性** — 進捗更新系は `idempotency_key` を受け取り、モバイルの再送で履歴が重複しないようにする
-- **楽観ロック** — 更新系は `version` を必須にし、不一致は 409 を返して画面で差分を提示
-- **エラー本文に機微情報を含めない** — 403 は理由を「権限がありません」に統一（存在推測を防ぐ）
-- **全ハンドラで監査記録** — 認証・認可・機微閲覧・エクスポートを `audit_log` へ
+> ⚠️ **`setInterval` / `node-cron` は使わないこと。** `references/periodic-updates.md` の規約どおり Heartbeat を使います（既存の `startLabWorkReminderScheduler()` はこの規約に反しているため、Operations では繰り返さない）。
+
+**共通規約**:
+- **冪等性** — 進捗更新は `idempotencyKey` を受け取り、モバイルの再送で履歴が重複しないようにする
+- **楽観ロック** — 更新系は `version` 必須。不一致は競合として画面で差分提示
+- **エラー本文に機微情報を含めない** — 権限エラーは理由を統一（存在推測の防止）
+- **全ミューテーションで `workItemEvents` に記録**し、機微閲覧は `auditLogs` に `READ` で記録
 
 ---
 
 ## 7. 移行方法
 
-既存インカムを**一度も止めずに**段階移行します。
+既存機能を**一度も止めずに**段階移行します。
 
-### Step 1. 個人アカウント基盤の追加（インカムは無変更）
+### Step 0. 緊急対応（Operations 着手前）
 
-1. Postgres を用意（Neon 東京）し、`facility` / `department` / `app_user` / `user_role` を作成
-2. `mirise:staff`（Redis）の氏名・職種を CSV で書き出し、メールアドレスと部署を補って `app_user` へ投入。既存の CSV 取り込み UI を `/ops/admin/users` に流用
-3. ログインは**メールのマジックリンク**（または Google Workspace SSO）。共通パスワードは Operations では使わない
-4. `lib/auth.ts` の `Session` を後方互換で拡張：
+§0 の S-1（認証情報のローテーション）を完了させます。これは Operations とは独立して**今すぐ**必要です。
 
-   ```ts
-   export type Session = {
-     role: Role;           // 既存。インカム用
-     exp: number;          // 既存
-     sub?: string;         // 追加: app_user.id
-     ver?: number;         // 追加: session_ver（失効世代）
-   };
-   ```
+### Step 1. 認証の穴を塞ぐ（1 週間・Operations の前提条件）
 
-   既存トークンは `sub` を持たないため、`/ops` 側は `sub` 必須として弾く。インカム側は従来通り動作し、**既存ユーザーへの影響ゼロ**
+1. `sdk.authenticateRequest()` に `isActive` / `employmentStatus === 'active'` の検査を追加
+2. JWT に `sessionVer` を載せ、`users` に `sessionVer` 列を追加。無効化・退職処理で +1 して**即時失効**
+3. セッション TTL を 1 年 → 妥当な期間（例: 30 日 + スライディング更新）に短縮
+4. `localAuth.login` にレート制限を追加（IP + メール単位、既存 DB か軽量なメモリ実装）
+5. ログイン成功・失敗を `auditLogs` に記録（`LOGIN` enum を本来の用途で使う）
 
-### Step 2. Operations の骨格投入（フラグ OFF）
+**この Step だけで、既存アプリのセキュリティが実質的に改善します。** Operations の有無に関わらず価値があります。
 
-- `app/ops/*` と `app/api/ops/*` を追加。`OPS_ENABLED !== 'true'` なら 404
-- `middleware.ts` の matcher に `/ops/:path*` を追加（`/api/ops` は各ハンドラで自前チェック）
-- この時点で main にマージ・本番デプロイしても、利用者からは何も見えない
+### Step 2. 機微データの保護（1.5 週間）
 
-### Step 3. パイロット運用（1 部署）
+1. `onboardingForms` のマイナンバー・年金番号・口座番号を**アプリ層で暗号化**（鍵は環境変数、KMS があればそちら）。既存レコードは移行スクリプトで暗号化
+2. マイナンバーの閲覧を専用 capability に限定し、**閲覧を監査記録**
+3. 患者データのルーターを `tenantProcedure` → `staffProcedure` 以上へ引き上げ、将来的に `ops_medical` 相当へ
+4. 添付ファイルの永続 URL を段階的に**キー保存 + 都度署名付き URL**へ移行
 
-- 総務または社長室の 1 部署で `OPS_ENABLED=true`。2 週間、既存の運用（メール・口頭・スプレッドシート）と**並行**
+### Step 3. Operations の骨格投入（フラグ OFF）
+
+- `drizzle/schema.ts` にテーブル追記 → `0068_*` マイグレーション生成・適用（追加のみ、破壊的変更なし）
+- `server/ops/` と `client/src/pages/ops/` を追加。`tenants.settings.opsEnabled !== true` なら 404
+- この時点で本番デプロイしても、利用者からは何も見えません
+
+### Step 4. パイロット運用（1 テナント・1 部署）
+
+- 総務または社長室で `opsEnabled = true`。2 週間、既存運用（口頭・LINE・スプレッドシート）と**並行**
 - 移行するのは**進行中の案件のみ**。過去案件は移行しない（履歴の正確性を担保できないため）
-- 既存スプレッドシートからの取り込みは CSV インポートで対応。取り込み時は全件 `created` イベントを記録し、出典を `detail` に残す
+- 既存スプレッドシートからの取り込みは既存の `CsvBulkImport` を流用。取り込み時は全件 `created` イベントを記録し、出典を残す
 
-### Step 4. 全部署展開
+### Step 5. 全部署・全テナント展開
 
-- 部署ごとに 1〜2 週間ずつ追加。チェックリスト定義と役割付与を部署単位で実施
-- 「今日から Hub 以外で指示を出さない」という運用ルールの明文化が成否を分けます（docs/12 として運用手順を追加）
+- 部署ごとに 1〜2 週間ずつ。チェックリスト定義と capability 付与を部署単位で実施
+- 「今日から Hub 以外で指示を出さない」という運用ルールの明文化が成否を分けます
 
-### Step 5. 定着後
+### Step 6. 既存 `tasks` との関係整理
 
-- インカム側のログインも個人アカウントに統一（共通パスワードの廃止）。これにより §9 R1・R2 が解消
-- Incident 型と LiveKit 全体ルームの連携（緊急時に Hub からインカム招集）を検討
+- 当面は**併存**（既存タスクは既存画面のまま）
+- 定着後、`tasks` を読み取り専用にして `workItems` へ一本化するか、`tasks` を「Operations 以前の軽量タスク」として残すかを判断
+- `tasks` → `workItems` の移行時は、期限・完了条件が欠けているレコードに既定値を補完する必要があるため、**移行は任意（オプトイン）**とします
 
-**ロールバック**：各 Step は `OPS_ENABLED=false` で即座に無効化できます。DB マイグレーションは前方互換（列追加のみ、既存列の削除を伴わない）を守り、直前デプロイへの Promote でいつでも戻せる状態を維持します。
+**ロールバック**: 各 Step は `opsEnabled = false` で即座に無効化できます。マイグレーションは前方互換（列・テーブルの追加のみ）を守ります。
 
 ---
 
 ## 8. テスト計画
 
-現在テストは 0 件・CI も無いため、**Operations 用のテスト基盤の新設が Phase 1 の一部**になります。既存インカムのコードには遡及してテストを書かず、Operations の新規コードのみを対象にします。
+既存の vitest 基盤（56 ファイル / 880 ケース）にそのまま追加します。**新規のテスト基盤構築は不要**です。
 
-### 8-1. 追加する基盤
+### 8-1. 追加するもの
 
-| 層 | ツール | 対象 |
-|---|---|---|
-| 単体 | Vitest | 権限判定 `can()`、必須制約バリデータ、レポート集計、秘密情報検出、冪等キー処理 |
-| DB 統合 | Vitest + Neon ブランチ（またはローカル Docker Postgres） | `CHECK` 制約・追記専用権限・トリガ・RLS の実挙動 |
-| API 統合 | Vitest + Next Route Handler 直接呼び出し | 認証・認可・楽観ロック・監査記録の書き込み |
-| E2E | Playwright（デスクトップ + モバイルビューポート） | ログイン→案件作成→進捗更新→承認→レポートの一連 |
-| CI | GitHub Actions（**新規**） | `lint` / `tsc --noEmit` / `vitest` / `playwright` / `drizzle-kit check` |
+| 層 | 対象 |
+|---|---|
+| 単体 | `canOps()`、必須制約バリデータ、レポート集計、秘密情報検出、冪等キー処理 |
+| DB 統合 | `CHECK` 制約の実挙動（TiDB で強制されるかの確認を含む）、追記専用性、UNIQUE による二重生成防止 |
+| API 統合 | 認可・楽観ロック・監査記録・通知配信（既存 `tenant-isolation.test.ts` の書式を踏襲） |
+| **CI（新規）** | `pnpm check`（型）+ `pnpm test` の自動実行。現在 CI がないため、これは新規構築 |
+
+E2E（Playwright）は Phase 3 のモバイル要件検証に限って導入を検討します。
 
 ### 8-2. 必ず自動テストで守る項目
 
-必須設計は「レビューで気をつける」ではなく**テストで固定**します。
-
 | # | テスト内容 | 種別 |
 |---|---|---|
-| T1 | 主担当を 2 名にする API 呼び出しが失敗する | API |
-| T2 | 期限なし / 完了条件なしの作成が 400 になる（API 層と DB 層の両方で） | API + DB |
-| T3 | `status='in_progress'` で `next_action` / `next_update_at` が空だと DB が拒否する | DB |
-| T4 | `work_item_event` に対する `UPDATE` / `DELETE` が権限エラーになる | DB |
-| T5 | 案件を更新すると必ず対応するイベントが 1 件増える（トリガ経由も含む） | DB |
-| T6 | §4-2 / §4-3 の権限マトリクスを**表からそのまま生成した全組み合わせ**で `can()` を検証（役割 8 × 操作 13 × 機微 3） | 単体 |
-| T7 | `system_admin` が `hr` / `medical` 案件を一覧・詳細・エクスポート・検索の**いずれの経路でも**取得できない | API |
-| T8 | 機微案件の閲覧が `audit_log` に記録される | API |
-| T9 | パスワードらしき文字列を本文・`secret_ref` に入れると拒否される（既知パターン + 高エントロピー文字列） | 単体 + API |
-| T10 | 日報が同じイベント列から**常に同じ結果**を返す（決定論性）。生成に外部 AI 呼び出しが発生しないことをモックで確認 | 単体 |
-| T11 | 退職処理（`session_ver` +1）後、既存 Cookie でのアクセスが即座に 401 になる | API |
-| T12 | 同一 `idempotency_key` の進捗更新を 2 回送っても履歴が 1 件のまま | API |
-| T13 | `version` 不一致の更新が 409 になり、データが壊れない | API |
-| T14 | モバイルビューポート（iPhone SE 相当）で、案件を開いてから進捗更新完了まで**操作 5 回以内・入力欄 4 つ以内** | E2E |
-| T15 | 添付のダウンロード URL が 5 分で失効し、権限のない利用者が発行できない | API |
+| T1 | 主担当を空 or 2 名にする作成が失敗する | API |
+| T2 | 期限なし / 完了条件なしの作成が失敗する（API 層と DB 層の両方） | API + DB |
+| T3 | `status='in_progress'` で `nextAction` / `nextUpdateAt` が空だと拒否される | DB + API |
+| T4 | `workItemEvents` に対する UPDATE / DELETE の経路が存在しない | 静的 + DB |
+| T5 | 案件を更新すると必ず対応するイベントが 1 件増え、old/new が両方入る | API |
+| T6 | §4-2 / §4-3 の表を**そのまま展開した全組み合わせ**で `canOps()` を検証 | 単体 |
+| T7 | `TenantAdmin` が `hr` / `medical` 案件を**一覧・詳細・検索・エクスポートのいずれの経路でも**取得できない | API |
+| T8 | 機微案件の閲覧が `auditLogs` に `READ` として記録される | API |
+| T9 | パスワードらしき文字列を本文・`secretRef` に入れると拒否される | 単体 + API |
+| T10 | 日報が同じイベント列から**常に同じ結果**を返し、**LLM を呼ばない**（モックで検証） | 単体 |
+| T11 | **無効化・退職したユーザーの既存セッションが即座に弾かれる**（Step 1 の検証） | API |
+| T12 | 同一 `idempotencyKey` の進捗更新を 2 回送っても履歴が 1 件 | API |
+| T13 | `version` 不一致の更新が拒否され、データが壊れない | API |
+| T14 | Operations の全プロシージャがテナント境界を越えない（既存 `tenant-isolation.test.ts` の Operations 版） | API |
+| T15 | 添付のダウンロード URL が短命で、権限のない利用者が発行できない | API |
+| T16 | `sensitivity` を `medical` → `general` に下げられない | API |
 
-### 8-3. 非機能・運用テスト
+### 8-3. 既存機能への回帰確認
 
-- 案件 10,000 件・イベント 200,000 件でのダッシュボード表示 1.5 秒以内（索引の妥当性確認）
-- Vercel の Cron によるレポート定期生成が二重起動しない（`report_snapshot` の UNIQUE 制約で担保）
-- パイロット部署での 2 週間 UAT：既存運用との突合、「30 秒で更新できたか」を実測で確認
+Operations 追加後、既存の 880 ケースが**全件パスすること**をマージ条件にします。`appRouter` への 1 行追加と schema への追記が既存に影響しないことの担保です。
 
 ---
 
 ## 9. セキュリティ上のリスク
 
-深刻度は **高 = 本番投入前に必ず解消 / 中 = Phase 内で解消 / 低 = 継続的に管理**。
+深刻度 — **緊急 = 即日 / 高 = Operations 着手前 / 中 = Phase 内 / 低 = 継続管理**
 
-| # | リスク | 深刻度 | 根拠（現状） | 対策 |
+| # | リスク | 深刻度 | 根拠（実コード） | 対策 |
 |---|---|:-:|---|---|
-| R1 | **共通パスワードでは行為者を特定できない** — 監査ログ・主担当者・変更履歴という要件が原理的に成立しない | **高** | `lib/auth.ts` の `Session = { role, exp }`。個人 ID を持たない | Operations は個人アカウント必須。`sub` を持たないセッションは `/ops` で一律拒否（§7 Step 1） |
-| R2 | **セッションの即時無効化ができない** — 退職者のアクセスが最大 12 時間残る。`CLINIC_PASSWORD` を変えても既存セッションは無効化されない（署名鍵は `AUTH_SECRET`） | **高** | `verifySessionToken()` は HMAC と `exp` のみ検証。サーバ側の失効機構なし | `app_user.session_ver` をトークンに埋め、検証時に DB 値と突合。退職処理で +1 → 即時失効（T11） |
-| R3 | **middleware が `/api/*` を保護しない** — この規約を知らずに Operations の API を足すと無防備なエンドポイントが生まれる | **高** | `matcher: ["/", "/admin", "/admin/:path*"]` | 全ハンドラ共通の `requireOpsSession()` を必須化し、「ハンドラ先頭で認可関数を呼んでいるか」を lint ルールと統合テストで機械的に検査 |
-| R4 | **医療・人事情報の混在** — 単一テーブルに全部署の案件が入るため、絞り込み漏れが即漏えいになる | **高** | 現状該当機能なし（新規リスク） | `sensitivity` による行制御 + 人事詳細の物理分離 + **DB の RLS による二重防壁** + 機微閲覧の監査記録（§4-3、T7・T8） |
-| R5 | **添付ファイルの流出** — 直リンクが共有されると権限が無効化する | **高** | 現状該当機能なし（新規リスク） | 公開 URL を保存せず、5 分失効の署名付き URL を都度発行。発行を監査記録。医療・人事添付は別バケット |
-| R6 | **秘密情報の本文混入** — System/Account の運用で、担当者が本文にパスワードを貼る事故は高頻度で起きる | **高** | 現状該当機能なし（新規リスク） | パスワード列を作らない（`secret_ref` のみ）。加えて保存時に既知パターン（`password:` `api[_-]?key` `-----BEGIN` `sk-` 等）と高エントロピー文字列を検出して**保存を拒否**。既存データの定期スキャンも実施（T9） |
-| R7 | **ログインのブルートフォース** — `/api/login` にレート制限・ロックアウトがない | 中 | `api/login/route.ts` に試行回数管理なし | Upstash Redis で IP + アカウント単位のレート制限。Operations のマジックリンクにも同様に適用。失敗を `audit_log` に記録 |
-| R8 | **監査ログの改ざん** — 管理者が自分の操作記録を消せると監査が成立しない | 中 | 現状ログ自体が存在しない | 追記専用（`UPDATE`/`DELETE` 権限を剥奪）+ ハッシュチェーン（`prev_hash`/`row_hash`）+ `system_admin` に監査ログの閲覧権限を与えない（§4-2） |
-| R9 | **一括エクスポートによる大量持ち出し** | 中 | 現状該当機能なし（新規リスク） | 役割ごとに件数上限、機微区分は既定で除外、実行を必ず監査記録、大量出力時は executive へ通知 |
-| R10 | **通知経由の情報漏えい** — ロック画面のプッシュ通知に患者情報や人事情報が出る | 中 | 現状該当機能なし（新規リスク） | 通知本文は「案件の更新期限です（OPS-000123）」等の識別子のみ。内容はアプリを開いて認証後に表示（docs/04 の患者情報を残さない方針に整合） |
-| R11 | **AI による人格評価・自動人事評価** — 禁止要件に反する実装が混入する | 中 | 現状 AI 機能なし | ①レポート生成は SQL 集計のみで LLM を一切呼ばない（T10）②評価スコアの列をスキーマに作らない ③`recruitment_private.notes` は事実記録限定と UI で明示 ④コードレビュー時のチェック項目として docs 化。docs/04 の「AI 文字起こしを入れない」方針と同じ立て付けにする |
-| R12 | **Upstash の全置換保存による設定消失** — 管理画面の同時編集で片方の変更が消える | 中 | `saveRooms()` / `saveStaff()` が JSON 丸ごと `SET`。楽観ロックなし | Operations では行単位 + `version` による楽観ロック（T13）。既存インカム側の改善は別課題として記録 |
-| R13 | **CI が無く品質ゲートが Vercel ビルドのみ** — 権限判定のリグレッションが本番に届く | 中 | `.github/` なし | GitHub Actions で lint / 型 / テストを必須化。権限マトリクステスト（T6）の失敗をマージブロック条件に |
-| R14 | **依存関係の脆弱性管理がない** | 低 | Dependabot 設定なし、`npm audit` の実行経路なし | Dependabot 有効化 + CI で `npm audit --production` |
-| R15 | **管理画面のネットワーク制限がない** | 低 | `/admin` はパスワードのみで到達可能 | `/ops/admin` は IP 制限または追加の再認証。docs/04「管理画面は IP 制限または二要素認証」の本番方針に沿う |
-| R16 | **`INTERCOM_API_KEY` による認証バイパス経路** — ヘッダー 1 つでトークンを取得できる | 低 | `api/token/route.ts` の `x-intercom-key` | Operations では同種の抜け道を作らない。既存分はキーの定期ローテーションを運用手順に追加 |
+| R1 | **本番の `JWT_SECRET`・DB 接続文字列・VAPID 秘密鍵・API キーが平文で配布物に含まれていた** | **緊急** | `.project-config.json` | §0 S-1 のローテーション手順。今後この種のファイルを共有しない運用ルール |
+| R2 | **マイナンバー・年金番号・銀行口座が平文保存**（コメントは "encrypted at app level" だが実装なし） | **高** | `onboardingForms`、`crypto` 使用箇所は HMAC とトークン生成のみ | アプリ層暗号化 + 閲覧を専用 capability に限定 + 閲覧の監査記録（Step 2） |
+| R3 | **無効化・退職ユーザーがアクセスし続けられる**（JWT 1 年・失効機構なし・`isActive` 未検査） | **高** | `sdk.authenticateRequest()`、`ONE_YEAR_MS` | `sessionVer` 方式で即時失効 + TTL 短縮 + 認証時の状態検査（Step 1、T11） |
+| R4 | **患者の医療情報を全ロール（Viewer 含む）が閲覧できる** | **高** | `orthodonticPatients` / `invisalign` / `lingual` / `patientVideos` / `phoneCallRecords` が `tenantProcedure` | 権限引き上げ + `ops_medical` capability + 閲覧監査（Step 2） |
+| R5 | **職務分離が構造的に不可能**（`ROLE_HIERARCHY` が一直線） | **高** | `shared/types.ts` | `opsPermissions` による直交 capability（§4-1）。既存ロールは変更しない |
+| R6 | **秘密情報の本文混入** — System/Account 運用で担当者が本文にパスワードを貼る事故は高頻度 | **高** | 新規リスク | パスワード列を作らない + 保存時に既知パターン（`password:` `api[_-]?key` `-----BEGIN` `sk-` 等）と高エントロピー文字列を検出して拒否（T9） |
+| R7 | **AI コンシェルジュが投稿・記事・タスクの本文を外部 LLM へ送信している** | 中 | `ai.chat` が `getAiContext()` の内容を system prompt に埋め込み `invokeLLM` へ | Operations データを AI の文脈に**入れない**。既存の投稿についても、患者情報を含む可能性を踏まえ送信範囲の見直しを推奨 |
+| R8 | **監査ログの欠落と改ざん可能性** — READ 未記録、勤怠・書類・患者・人事が対象外、`details` に変更前がない、アプリから UPDATE/DELETE 可能 | 中 | `audit()` 82 箇所の分布 | Operations では old/new 記録 + 追記専用 + 機微 READ 記録。既存分は段階的に補完 |
+| R9 | **ログインのブルートフォース耐性なし** | 中 | `localAuth.login` にレート制限なし | IP + アカウント単位のレート制限 + 失敗の監査記録（Step 1） |
+| R10 | **添付ファイルの永続 URL** — `storagePut()` の戻り URL を DB に保存し配布。履歴書・資格証明書・患者動画を含む | 中 | `documents.fileUrl`、`onboardingForms.resumeFiles[].url` | **要検証**: 当該 URL が未認証で取得可能かを実測。可能なら短命署名付き URL へ移行（Step 2） |
+| R11 | **AI による人格評価・自動人事評価の混入** | 中 | 現状 `staffEvaluations` は人手入力（rating 1-5 + コメント）で AI 不使用＝要件充足。ただし `getStaffContributionSummary()` の活動集計が評価入力に使われる余地あり | ①レポート生成は SQL 集計のみで LLM を呼ばない（T10）②評価スコア列を Operations に作らない ③活動集計は「事実の提示」に留め、スコア化・順位付けを行わない ④コードレビューのチェック項目として明文化 |
+| R12 | **通知経由の情報漏えい** — ロック画面のプッシュ通知や LINE に患者情報・人事情報が出る | 中 | `pushService` / `lineMessaging` が `title` + `body` をそのまま送信 | Operations の通知本文は識別子のみ（例: 「案件 OPS-000123 の更新期限です」）。内容はアプリを開いて認証後に表示 |
+| R13 | **同名 `adminProcedure` の併存** — `_core/trpc.ts`（`users.role==='admin'`）と `routers.ts`（`appRole`）で意味が異なる | 中 | 両ファイル | Operations では独自の `opsProcedure` を使い混同を避ける。既存分は改名を推奨 |
+| R14 | **CI がなく品質ゲートが手動のみ** | 中 | `.github/` なし | 型チェック + 880 ケース + Operations テストの自動実行。T6・T7 の失敗をマージブロック条件に |
+| R15 | **`startLabWorkReminderScheduler()` がプロセス内タイマー** — Cloud Run のアイドル終了で停止しうる | 低 | `_core/index.ts`、`references/periodic-updates.md` の禁止事項に該当 | Operations は Heartbeat（`/api/scheduled/*`）で実装。既存分も移行を推奨 |
+| R16 | **依存関係の脆弱性管理がない** | 低 | Dependabot 等なし | `pnpm audit` の定期実行 |
+| R17 | **一括エクスポートによる大量持ち出し** | 低 | 新規リスク | 件数上限・機微区分の既定除外・実行の監査記録 |
 
-**個人情報保護法上の留意**：採用情報・人事情報は個人情報、医療情報は要配慮個人情報に該当します（docs/04 参照）。本設計は「保存する情報を最小化し、区分ごとにアクセスを分離し、閲覧を記録する」方針で構成しています。実運用前に、保存項目・保存期間・削除手順・開示請求対応の 4 点を法務確認してください。
+**個人情報保護法・番号法上の留意**: 採用・人事情報は個人情報、患者の診療情報は**要配慮個人情報**、マイナンバーは**特定個人情報**であり、それぞれ求められる安全管理措置の水準が異なります。本設計は「区分ごとにアクセスを分離し、閲覧を記録する」方針ですが、保存項目・保存期間・削除手順・開示請求対応の 4 点は実運用前に法務確認をお願いします。
 
 ---
 
 ## 10. 実装を分割した作業計画
 
-各フェーズは**単独でデプロイ可能**かつ**`OPS_ENABLED=false` で無害**です。工数は 1 名専任換算の目安です。
+工数は 1 名専任換算の目安です。
 
-### Phase 0 — 基盤整備（1 週間）
-- Postgres（Neon 東京）の用意、Drizzle 導入、マイグレーション運用の確立
-- Vitest / Playwright / GitHub Actions（lint・型・テスト）の新設 ← **現状ゼロからの構築**
-- `OPS_ENABLED` フラグと `/ops` の空スケルトン、middleware matcher 追加
-- **完了条件**: CI が緑で main にマージされ、本番に何の変化も起きないこと
+### Phase 0 — 緊急対応（0.5 週間 / Operations と独立）
+- §0 S-1 の認証情報ローテーション（JWT_SECRET・DB パスワード・VAPID・API キー）
+- DB アクセスログの点検
+- 機密ファイルの共有方法に関する運用ルールの明文化
+- **完了条件**: 漏えいした鍵がすべて無効化されている
 
-### Phase 1 — 個人アカウントと権限（2 週間）
-- `facility` / `department` / `app_user` / `user_role` のスキーマとマイグレーション
-- マジックリンク認証（または Google Workspace SSO）、`Session` の後方互換拡張、`session_ver` による即時失効
-- 権限判定 `can()` と権限マトリクステスト（T6・T7・T11）
-- `audit_log` の追記専用実装（DB 権限剥奪・ハッシュチェーン）
-- ユーザー CSV 投入画面（既存 AdminClient の UI を流用）
-- レート制限（R7）
-- **完了条件**: 実ユーザーがログインでき、役割別の到達可否がテストで固定されている
+### Phase 1 — 認証の是正（1 週間 / Operations の前提条件）
+- `isActive` / `employmentStatus` の認証時検査、`sessionVer` による即時失効、TTL 短縮
+- ログインのレート制限、ログイン成功・失敗の監査記録
+- T11 を含む回帰テスト
+- **完了条件**: 無効化したユーザーが即座にアクセスできなくなる
 
-### Phase 2 — Work Item のコア（3 週間）
-- `work_item` / `work_item_detail` / `work_item_event` / `work_item_watcher` / `work_item_link`
-- 必須設計の `CHECK` 制約と更新トリガ（T1〜T5）
-- 型 10 種の zod スキーマと動的フォーム
-- 一覧・詳細・作成・更新 API、楽観ロック、履歴タイムライン UI
+### Phase 2 — 機微データの保護（1.5 週間）
+- マイナンバー・年金番号・口座番号のアプリ層暗号化と既存データ移行
+- 患者データルーターの権限引き上げ
+- 添付 URL の署名付き化（R10 の実測を先行）
+- **完了条件**: 特定個人情報が平文で DB に存在しない
+
+### Phase 3 — Operations 基盤（2 週間）
+- `workItems` ほか 10 テーブル + マイグレーション `0068`
+- `canOps()` と `opsPermissions`、権限マトリクステスト（T6・T7）
+- `opsEnabled` フラグ、`/ops` スケルトン、CI 新設
+- **完了条件**: 本番デプロイしても利用者に何も見えず、既存 880 ケースが全件パス
+
+### Phase 4 — Work Item のコア（2.5 週間）
+- 必須制約（T1〜T3）、変更履歴（T5）、10 型の zod スキーマと動的フォーム
+- 一覧・詳細・作成・更新、楽観ロック、履歴タイムライン UI
 - **完了条件**: Task / Decision / Incident の 3 型で一連の運用が回る
 
-### Phase 3 — モバイル 30 秒更新と PWA（1.5 週間）
-- `PATCH /items/:id/progress`、冪等キー、オフラインキュー（T12）
-- PWA 化（manifest・Service Worker・アイコン・viewport メタ）← **現状ゼロからの構築**
-- Web Push（購読登録・期限切れ通知）。通知本文は識別子のみ（R10）
-- モバイル E2E（T14）
+### Phase 5 — モバイル 30 秒更新（1 週間）
+- `updateProgress` API、冪等キー、オフラインキュー（T12）
+- 既存 PWA 上の専用 UI、Web Push / LINE 通知（本文は識別子のみ）
+- 実機での 30 秒計測
 - **完了条件**: 実機で 30 秒以内の更新が計測できる
 
-### Phase 4 — 承認と経営判断 Inbox（1.5 週間）
-- `approval_request`、`/ops/inbox`、承認・却下・保留（理由必須）
-- 承認期限の通知、`waiting_decision` との連動
-- **完了条件**: 社長室の判断待ち案件が Inbox に漏れなく集まる
+### Phase 6 — 承認と経営判断 Inbox（1 週間）
+- `workItemApprovals`、`/ops/inbox`、承認・却下・保留（理由必須）
+- `approvalNotifier` による 3 チャネル通知（**既存関数をそのまま利用**）
+- **完了条件**: 社長室の判断待ち案件が漏れなく Inbox に集まる
 
-### Phase 5 — レポート自動生成（1.5 週間）
-- イベント列からの決定論的集計、`report_snapshot`、Vercel Cron による定期生成
-- 日報・週報・月報の画面、スコープ（個人・部署・全社）切替
-- 決定論性テスト・AI 非使用テスト（T10）
+### Phase 7 — レポート自動生成（1 週間）
+- イベント列からの決定論的集計、`opsReportSnapshots`、Heartbeat による定期生成
+- 日報・週報・月報の画面、スコープ切替
+- 決定論性・AI 非使用テスト（T10）
 - **完了条件**: 手作業ゼロで日報が出る
 
-### Phase 6 — 残る型と機微情報の分離（2.5 週間）
-- Routine Checklist（テンプレート・実施記録）、Handover（受領確認まで）、System/Account（`secret_ref` のみ・秘密検出）、Recruitment（`recruitment_private` 隔離）、Procurement、Project Milestone、Review
-- 添付ファイル（署名付き URL・監査記録・機微別バケット）
-- 機微区分の RLS 二重防壁、エクスポート制限（R4・R5・R9）
-- **完了条件**: 全 10 型が使え、T7〜T9 が緑
+### Phase 8 — 残る型と機微分離（2 週間）
+- Routine Checklist（既存 `recurrence.ts` を流用）、Handover（受領確認まで）、System/Account（`secretRef` + 秘密検出）、Recruitment（`hr` 区分）、Procurement、Project Milestone、Review
+- 添付、機微区分の閲覧監査、エクスポート制限（T8・T9・T15・T16）
+- **完了条件**: 全 10 型が使え、機微分離のテストが緑
 
-### Phase 7 — パイロットと展開（4 週間）
-- 1 部署でのパイロット、運用手順の docs 化（docs/12・13）、フィードバック反映
-- 部署ごとの段階展開、役割付与、チェックリスト定義
+### Phase 9 — パイロットと展開（4 週間）
+- 1 部署でのパイロット → 運用手順の文書化 → 部署ごとの段階展開
 - **完了条件**: 全 7 部署が Hub 上で運用されている
 
-**合計目安: 約 17 週間（4 ヶ月）／専任 1 名。** 2 名体制なら Phase 2 以降を並列化して約 11 週間。
+**合計目安: 約 16.5 週間（4 ヶ月）／専任 1 名。**
+うち Phase 0〜2（3 週間）は**Operations とは独立に価値がある既存アプリのセキュリティ改善**です。Operations 本体は Phase 3〜9 の約 13.5 週間。2 名体制なら Phase 4 以降を並列化して約 9 週間。
 
-### 先に決めておくべき事項（実装着手前）
+### 先に決めておくべき事項
 
-1. **認証方式** — Google Workspace SSO か、メールのマジックリンクか。既存のメール環境に依存するため要確認
-2. **DB の選定** — Neon / Supabase / Vercel Postgres のいずれか。医療情報を扱うため**東京リージョン**と暗号化・バックアップ要件の確認が必要
-3. **インフラ費用** — 現在は全て無料枠（Vercel Hobby / LiveKit Free / Upstash Free）。Operations 追加により **Vercel Pro（商用利用・Cron・保護機能）と Postgres の有料化が必要**になる見込み。月額の承認が要ります
-4. **部署と役割の実体** — §4-1 の 8 役割を、実際の職位（誰が executive か、hr_officer は誰か）に割り当てる必要があります
+1. **TiDB の `CHECK` 制約サポート状況** — 必須設計を DB 側で強制できるかが設計の分岐点。強制できない場合はアプリ層 2 重ガード + 整合性チェックのバッチで代替する
+2. **暗号鍵の管理方法** — マイナンバー暗号化の鍵をどこに置くか（環境変数 / KMS）。Manus プラットフォームで使える選択肢の確認が必要
+3. **8 つの主体を実職位へ割り当て** — 誰が `ops_executive` か、`ops_hr` は誰か、`ops_medical` は誰か
+4. **Operations を全テナントに提供するか、MIRISE 自社テナント限定か** — SaaS として売るなら Stripe のプラン/アドオン設計（既存 `subscriptionAddons`）に組み込む必要がある
 5. **保存期間と削除方針** — 案件・履歴・監査ログそれぞれの保存年数と削除手順（法務確認事項）
+6. **既存 `tasks` の扱い** — 併存を続けるか、いずれ `workItems` へ一本化するか
