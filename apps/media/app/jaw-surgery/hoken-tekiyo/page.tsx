@@ -51,6 +51,49 @@ export default function Page() {
         重要なのは、<strong>症状が同じでも、治療計画によって保険適用かどうかが変わる</strong>
         ことです。骨格性のずれがあっても、手術を行わずカモフラージュ矯正(歯の移動のみで見た目を補正する治療)を選ぶ場合、その治療は自由診療になります。
       </p>
+      <figure className="article-fig">
+        <svg viewBox="0 0 620 470" role="img" aria-label="健康保険が適用されるかどうかの判定フロー" style={{ minWidth: '540px' }}>
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="var(--ink-soft)" />
+            </marker>
+          </defs>
+          {/* メインの流れ */}
+          <rect x="30" y="16" width="330" height="52" rx="8" fill="var(--paper)" stroke="var(--line-strong)" />
+          <text x="195" y="38" textAnchor="middle" fontSize="14" fill="var(--ink)">骨格のずれを指摘された</text>
+          <text x="195" y="57" textAnchor="middle" fontSize="12" fill="var(--ink-soft)">精密検査・セファロ分析を受ける</text>
+          <line x1="195" y1="68" x2="195" y2="96" stroke="var(--ink-soft)" markerEnd="url(#ar)" />
+          <rect x="30" y="100" width="330" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--accent-line)" />
+          <text x="195" y="124" textAnchor="middle" fontSize="14" fill="var(--ink)">条件1「顎変形症」と診断された?</text>
+          <line x1="195" y1="152" x2="195" y2="192" stroke="var(--ink-soft)" markerEnd="url(#ar)" />
+          <text x="205" y="177" fontSize="12" fill="var(--accent)">はい</text>
+          <rect x="30" y="196" width="330" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--accent-line)" />
+          <text x="195" y="220" textAnchor="middle" fontSize="14" fill="var(--ink)">条件2 外科手術を含む治療計画?</text>
+          <line x1="195" y1="248" x2="195" y2="288" stroke="var(--ink-soft)" markerEnd="url(#ar)" />
+          <text x="205" y="273" fontSize="12" fill="var(--accent)">はい</text>
+          <rect x="30" y="292" width="330" height="52" rx="8" fill="var(--accent-soft)" stroke="var(--accent-line)" />
+          <text x="195" y="311" textAnchor="middle" fontSize="14" fill="var(--ink)">条件3 指定医療機関で治療する?</text>
+          <text x="195" y="330" textAnchor="middle" fontSize="12" fill="var(--ink-soft)">(顎口腔機能診断施設)</text>
+          <line x1="195" y1="344" x2="195" y2="384" stroke="var(--ink-soft)" markerEnd="url(#ar)" />
+          <text x="205" y="369" fontSize="12" fill="var(--accent)">はい</text>
+          <rect x="30" y="388" width="330" height="60" rx="8" fill="var(--accent)" />
+          <text x="195" y="413" textAnchor="middle" fontSize="15" fontWeight="bold" fill="#ffffff">健康保険が適用</text>
+          <text x="195" y="434" textAnchor="middle" fontSize="12" fill="#ffffff">自己負担3割・高額療養費制度の対象</text>
+          {/* いいえ の分岐 */}
+          <rect x="430" y="196" width="170" height="72" rx="8" fill="var(--warn-bg)" stroke="var(--warn-line)" />
+          <text x="515" y="226" textAnchor="middle" fontSize="14" fill="var(--warn-ink)">自由診療</text>
+          <text x="515" y="247" textAnchor="middle" fontSize="12" fill="var(--warn-ink)">(全額自己負担)</text>
+          <polyline points="360,126 515,126 515,192" fill="none" stroke="var(--ink-soft)" strokeDasharray="4 3" markerEnd="url(#ar)" />
+          <text x="368" y="120" fontSize="12" fill="var(--ink-soft)">いいえ</text>
+          <line x1="360" y1="222" x2="426" y2="222" stroke="var(--ink-soft)" strokeDasharray="4 3" markerEnd="url(#ar)" />
+          <text x="368" y="216" fontSize="12" fill="var(--ink-soft)">いいえ</text>
+          <polyline points="360,318 515,318 515,272" fill="none" stroke="var(--ink-soft)" strokeDasharray="4 3" markerEnd="url(#ar)" />
+          <text x="368" y="312" fontSize="12" fill="var(--ink-soft)">いいえ</text>
+        </svg>
+        <figcaption>
+          保険適用の判定フロー(概要)。3つの条件をすべて満たす場合に健康保険が適用されます。実際の適用可否は指定医療機関での診断により決まります。
+        </figcaption>
+      </figure>
 
       <h2 id="tekiyogai">保険が適用されないケース</h2>
       <ul>
@@ -72,6 +115,30 @@ export default function Page() {
         自由診療で外科矯正に相当する治療を行った場合の総額(矯正費用+手術費用)と比べると、負担額には大きな差が生じます。骨格性の問題を指摘された方は、
         <strong>治療を契約する前に</strong>
         、保険適用の可能性について指定医療機関で診断を受けることをおすすめします。
+      </p>
+
+      <h2 id="sagashikata">指定医療機関(顎口腔機能診断施設)の探し方</h2>
+      <p>
+        保険適用の条件のうち、自分で調べて確認できるのが「指定医療機関かどうか」です。顎口腔機能診断施設の指定を受けているかは、次の方法で確認できます。
+      </p>
+      <ul>
+        <li>
+          <strong>医院に直接聞く</strong>
+          :「顎口腔機能診断施設の指定を受けていますか」と電話やメールで確認して問題ありません。保険での外科矯正を扱う医院であれば、日常的に受けている質問です。
+        </li>
+        <li>
+          <strong>学会・公的機関の一覧で調べる</strong>
+          :関連学会が指定医療機関の一覧を公開しているほか、施設基準の届出状況は地方厚生局の公表資料でも確認できます。
+        </li>
+        <li>
+          <strong>大学病院の矯正歯科</strong>
+          :多くの大学病院の矯正歯科は指定を受けており、口腔外科との連携体制も院内で完結しやすいという特徴があります。通院距離と通院頻度(術前矯正中は月1回程度の通院が続きます)も合わせて検討してください。
+        </li>
+      </ul>
+      <p>
+        なお、指定を受けていない医院で相談した場合でも、顎変形症の疑いがあれば指定医療機関を紹介してもらえることがあります。
+        <strong>契約前に「この治療計画は保険適用になるか」を文書で確認する</strong>
+        ことが、あとから費用区分の認識違いに気づく事態を防ぎます。
       </p>
 
       <h2 id="nagare">相談から治療開始までの流れ</h2>
