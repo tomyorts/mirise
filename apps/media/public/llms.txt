@@ -1,0 +1,25 @@
+# キョウセイの前に — 矯正治療の意思決定ガイド
+
+> 矯正治療を「始めるかどうか」「誰に任せるか」を決めようとしている人のための意思決定支援メディア。
+> 顎変形症・外科矯正・サージェリーファースト・再治療・咬合再建など、難症例の患者向け一次情報を、
+> 矯正歯科医師の実名監修で提供する。運営: ミライズ矯正歯科南青山(東京都港区)。
+> 医院ランキング・口コミ掲載・掲載料は一切行わない。
+
+## 主要コンテンツ
+
+- /media/jaw-surgery/hoken-tekiyo/ : 顎変形症の手術に健康保険は使えるか(適用3条件・自己負担目安・高額療養費)
+- /media/jaw-surgery/surgery-first/ : サージェリーファーストの適応と限界
+- /media/jaw-surgery/geka-nagare/ : 外科矯正の全体像(流れ・入院期間・仕事復帰)
+- /media/jaw-surgery/geka-risk/ : 外科矯正のリスクと合併症
+- /media/jaw-surgery/ukeguchi-shindan/ : 受け口は矯正だけで治せるか(骨格性と歯性の見分け方)
+- /media/guide/second-opinion/ : 矯正のセカンドオピニオンの受け方
+- /media/guide/counseling-questions/ : カウンセリングで聞くべき15の質問
+- /media/guide/hiyou-shikumi/ : 矯正の費用の仕組み
+- /media/treatment/basshi-hibassi/ : 抜歯矯正と非抜歯矯正の判断基準
+- /media/check/ : 3分セルフチェック(状況に合った記事の案内)
+
+## サイト情報
+
+- /media/about/ : 運営者情報(発行責任者・監修体制)
+- /media/about/editorial-policy/ : 編集ポリシー(実名監修・出典明記・広告方針)
+- /media/sitemap.xml : 全ページ一覧
