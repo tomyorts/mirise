@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import ArticleLayout from '@/components/ArticleLayout';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
@@ -49,7 +50,7 @@ export default function Page() {
       </div>
       <p>
         重要なのは、<strong>症状が同じでも、治療計画によって保険適用かどうかが変わる</strong>
-        ことです。骨格性のずれがあっても、手術を行わずカモフラージュ矯正(歯の移動のみで見た目を補正する治療)を選ぶ場合、その治療は自由診療になります。
+        ことです。骨格性のずれがあっても、手術を行わず<Link href="/glossary/#camouflage">カモフラージュ矯正</Link>(歯の移動のみで見た目を補正する治療)を選ぶ場合、その治療は自由診療になります。
       </p>
       <figure className="article-fig">
         <svg viewBox="0 0 620 470" role="img" aria-label="健康保険が適用されるかどうかの判定フロー" style={{ minWidth: '540px' }}>
@@ -109,7 +110,7 @@ export default function Page() {
       <p>
         保険適用(3割負担)の場合、術前矯正・手術・入院・術後矯正を合わせた自己負担の総額は、おおむね
         <strong>{reviewValue('hoken-tekiyo', 'hokenGaku')}</strong>
-        が目安です。手術と入院の費用は高額療養費制度の対象となるため、所得区分によっては手術月の自己負担がさらに軽減されます。
+        が目安です。手術と入院の費用は<Link href="/guide/kougaku-ryouyouhi/">高額療養費制度</Link>の対象となるため、所得区分によっては手術月の自己負担がさらに軽減されます。対象範囲と手続きは同記事で詳しく解説しています。
       </p>
       <p>
         自由診療で外科矯正に相当する治療を行った場合の総額(矯正費用+手術費用)と比べると、負担額には大きな差が生じます。骨格性の問題を指摘された方は、
@@ -119,7 +120,7 @@ export default function Page() {
 
       <h2 id="sagashikata">指定医療機関(顎口腔機能診断施設)の探し方</h2>
       <p>
-        保険適用の条件のうち、自分で調べて確認できるのが「指定医療機関かどうか」です。顎口腔機能診断施設の指定を受けているかは、次の方法で確認できます。
+        保険適用の条件のうち、自分で調べて確認できるのが「指定医療機関かどうか」です。<Link href="/glossary/#shitei-shisetsu">顎口腔機能診断施設</Link>の指定を受けているかは、次の方法で確認できます。
       </p>
       <ul>
         <li>

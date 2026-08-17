@@ -1,4 +1,5 @@
 import ArticleLayout from '@/components/ArticleLayout';
+import GekaTimeline from '@/components/GekaTimeline';
 import Link from 'next/link';
 import DisclosureBlock from '@/components/DisclosureBlock';
 import ProcessFlow from '@/components/ProcessFlow';
@@ -20,6 +21,7 @@ export default function Page() {
       <p>顎変形症と診断され、指定医療機関で手術を前提とした治療計画を立てる場合には、矯正治療と手術の両方に健康保険が適用されます。</p>
       <h2 id="zentai-timeline">治療全体のタイムライン：完了まで2年半〜4年が目安</h2>
       <p>外科矯正は、術前矯正、入院・手術、術後矯正、保定という4つの段階を順番に進みます。全体の期間は一般に2年半〜4年程度で、歯の動きやすさや手術の内容によって個人差があります。</p>
+      <GekaTimeline />
       <ProcessFlow
         title="外科矯正の全体の流れ"
         steps={[

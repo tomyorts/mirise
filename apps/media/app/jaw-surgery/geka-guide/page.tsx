@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import ArticleLayout from '@/components/ArticleLayout';
+import GekaTimeline from '@/components/GekaTimeline';
 import { getArticle } from '@/lib/articles';
 import { articleMetadata } from '@/lib/metadata';
 
@@ -18,6 +19,7 @@ export default function Page() {
       <p>
         この記事は、その道のりを6つのステージに整理した完全ガイドです。まず下の表で全体の流れをつかみ、ご自身が今どの段階にいるかを確認したうえで、各ステージの解説と詳細記事に進んでください。
       </p>
+      <GekaTimeline />
       <div className="table-wrap">
       <table>
         <thead>

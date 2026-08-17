@@ -2,7 +2,11 @@ import type { Metadata } from 'next';
 import Breadcrumbs from '@/components/Breadcrumbs';
 import { SITE } from '@/lib/site';
 
-export const metadata: Metadata = { title: '編集ポリシー' };
+export const metadata: Metadata = {
+  title: '編集ポリシー',
+  description:
+    '「キョウセイの前に」の編集ポリシー。運営者の開示、歯科医師による実名監修、出典の明記、広告方針(ランキング・体験談・アフィリエイトを行わない理由)など、記事の作り方と中立性の担保について説明します。',
+};
 
 // 文面の原本: docs/media/03_editorial_policy.md(改定時は原本と同期する)
 export default function EditorialPolicy() {
