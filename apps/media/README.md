@@ -77,3 +77,11 @@ OGP画像を`.png`にリネームしHTML参照も書き換える(Apache/WordPres
 
 現在 `content/review.ts` に登録済みの記事のみこの方式で公開可能(順次追加)。
 未登録の記事は従来どおり `lib/articles.ts` の `reviewStatus` で管理。
+
+## 公開当日の手順・機械検査
+
+- **公開当日の段取り書**: [docs/media/11_launch_runbook.md](../../docs/media/11_launch_runbook.md)
+  (段階公開/全体ローンチの2モード、Web担当への設置手順、ロールバック含む)
+- `node scripts/preflight-check.mjs` — リンク切れ・sitemap網羅・OGP・title/description重複の一括検査
+- `node scripts/compliance-lint.mjs` — 医療広告ガイドライン観点の表現スイープ
+  (レポートモード。否定・注意喚起の文脈は問題なし。運営者ページの「当院」は開示として除外済み)
