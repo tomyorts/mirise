@@ -6,7 +6,7 @@ import { readdirSync, statSync, readFileSync } from 'fs';
 import { join, relative } from 'path';
 
 const OUT = join(process.cwd(), 'out');
-const PLACEHOLDER = /[◯○●]|要確認/;
+const PLACEHOLDER = /[◯○●]|要確認|監修時に/;
 
 function walk(dir, cb) {
   for (const name of readdirSync(dir)) {

@@ -149,7 +149,7 @@ export default function ArticleLayout({
               {meta.references.map((r) => (
                 <li key={r.name}>
                   {r.url ? <a href={r.url}>{r.name}</a> : r.name}
-                  {r.note ? `(${r.note})` : ''}
+                  {/* note は編集部内部のメモ(URL確定待ち等)。読者には表示しない */}
                 </li>
               ))}
             </ol>
