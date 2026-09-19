@@ -73,6 +73,9 @@ export default function App() {
   const [connecting, setConnecting] = useState(false);
   const [micOn, setMicOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 受信音をスピーカーで鳴らすか(true)、受話口/イヤホン側に寄せるか(false)。
+  // 既定はスピーカー: 私物スマホをポケットに入れたままでも聞こえるようにするため。
+  const [speakerOn, setSpeakerOn] = useState(true);
   // Phase B: ポケット/バックグラウンド送信(PushToTalkフレームワーク)。
   const [pttJoined, setPttJoined] = useState(false);
   const [pttBusy, setPttBusy] = useState(false);
@@ -224,10 +227,14 @@ export default function App() {
         await cleanup();
         logDebug("connect: cleanup完了");
 
-        // イヤホン非接続時は受話口(プライベート)へ。スピーカーで患者に聞こえるのを防ぐ。
+        // 受信音の出力先。Bluetooth/有線イヤホンが繋がっていればそちらが自動で
+        // 優先されるため、ここで指定するのは「イヤホンが無いときの既定」だけ。
+        // speakerにする理由: 私物スマホをポケットに入れたまま使う運用では、
+        // 受話口(耳に当てる小さいスピーカー)だと物理的に聞こえないため。
+        // 患者の前で静かにしたい場合は画面の「受話口(静音)」ボタンで切り替える。
         // これは有効化(activate)ではなく経路の好み設定のみなので、自動管理と競合しない。
         try {
-          await AudioSession.configureAudio({ ios: { defaultOutput: "earpiece" } });
+          await AudioSession.configureAudio({ ios: { defaultOutput: "speaker" } });
         } catch (audioConfigError) {
           console.warn("audio route config skipped", audioConfigError);
         }
@@ -590,6 +597,23 @@ export default function App() {
     }
   }, []);
 
+  // 受信音の出力先を切り替える。
+  // スピーカー: ポケットに入れたままでも聞こえる(既定)。
+  // 受話口(静音): 患者の前などで周囲に聞かせたくない時。Bluetoothイヤホンを
+  // 着けている場合は、そちらへ自動で流れる(iOSが優先する)。
+  const toggleSpeaker = useCallback(() => {
+    const next = !speakerOn;
+    setSpeakerOn(next);
+    void (async () => {
+      try {
+        await AudioSession.selectAudioOutput(next ? "force_speaker" : "default");
+        logDebug(`音声出力: ${next ? "スピーカー" : "受話口/イヤホン"}に切替`);
+      } catch (e) {
+        logDebug(`音声出力の切替に失敗 ${e instanceof Error ? e.message : String(e)}`);
+      }
+    })();
+  }, [speakerOn, logDebug]);
+
   // 「話す」ホールド: 押している間だけ送信(PTKit経由)。
   const pttPressIn = useCallback(() => {
     void PttChannel?.beginTransmitting();
@@ -778,10 +802,17 @@ export default function App() {
               </Text>
             </Pressable>
 
+            <Pressable style={styles.toggle} onPress={toggleSpeaker}>
+              <Text style={styles.toggleText}>
+                {speakerOn ? "🔊 受信音: スピーカー" : "🔇 受信音: 受話口（静音）"}
+              </Text>
+            </Pressable>
+
             <Text style={styles.hint}>
               「押して話す」を押している間だけ声が流れます。常時ONにはなりません。
-              🔘 キーボード型BLEリモコン（シャッター・ページめくり器など）でも送信ON/OFF
-              （トグル）できます（画面ONのときのみ。ロック中はiTag型を使用）。
+              🎧 Bluetoothイヤホンを接続していれば、受信音は自動でイヤホンに流れます
+              （周囲や患者には聞こえません）。イヤホンが無いときはスピーカーで鳴るので、
+              ポケットに入れたままでも聞こえます。静かにしたい時は上のボタンで切り替えてください。
               切り忘れ防止のため、送信は約30秒で自動停止します。
               診療中は患者情報を言わず、チェア番号やセット名で運用してください。
             </Text>

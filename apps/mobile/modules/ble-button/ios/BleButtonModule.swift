@@ -29,7 +29,7 @@ public class BleButtonModule: Module {
     Events("onPress", "onStateChanged")
 
     Constants([
-      "buildTag": "ble-6"
+      "buildTag": "audio-1"
     ])
 
     OnCreate {
