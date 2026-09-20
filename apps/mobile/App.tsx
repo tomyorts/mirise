@@ -576,9 +576,13 @@ export default function App() {
         // イヤホン等のボタンを送信操作に割り当てられたか(iOS17+)。
         // これが有効なら、ポケットに入れたままイヤホンのボタンで送信できる。
         if (payload?.enabled) {
-          logDebug("イヤホンのボタン: 送信操作に割当て成功");
+          logDebug("イヤホンのボタン: Apple公式経路を有効化");
+        } else if (payload?.error) {
+          // 実際に失敗した場合のみ「不可」と表示する。
+          logDebug(`イヤホンのボタン: Apple公式経路は使えません（${payload.error as string}）`);
         } else {
-          logDebug(`イヤホンのボタン: 割当て不可 ${(payload?.error as string) ?? ""}`);
+          // 排他制御のため、こちらが意図的に無効化した場合。エラーではない。
+          logDebug("イヤホンのボタン: Apple公式経路を無効化（アプリ側で受け取るため）");
         }
       }),
       PttChannel.addListener("onError", (payload) => {
