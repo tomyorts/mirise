@@ -10,10 +10,17 @@ export type RemotePttModuleType = {
   start(): void;
   /** 購読を停止 */
   stop(): void;
+  /**
+   * イヤホンの再生/一時停止ボタンを送信トグルとして使うか(旧ビルドには無い)。
+   * 有効にするとロック画面のPTTトークボタンは表示されなくなる。
+   */
+  setMediaButtonEnabled?: (enabled: boolean) => void;
+  /** イヤホンボタンが現在有効か(旧ビルドには無い) */
+  isMediaButtonEnabled?: () => boolean;
   /** onToggle イベントの購読 */
   addListener(
     eventName: "onToggle",
-    listener: (payload: Record<string, never>) => void,
+    listener: (payload: { source?: string }) => void,
   ): EventSubscription;
 };
 

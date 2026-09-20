@@ -76,6 +76,10 @@ export default function App() {
   // 受信音をスピーカーで鳴らすか(true)、受話口/イヤホン側に寄せるか(false)。
   // 既定はスピーカー: 私物スマホをポケットに入れたままでも聞こえるようにするため。
   const [speakerOn, setSpeakerOn] = useState(true);
+  // イヤホンの再生/一時停止ボタンを送信トグルとして使うか。
+  // 有効にするとロック画面のPTTトークボタンは出なくなるトレードオフがあるため、
+  // 画面から切り替えられるようにして実機で比較できるようにする。
+  const [earbudButtonOn, setEarbudButtonOn] = useState(false);
   // Phase B: ポケット/バックグラウンド送信(PushToTalkフレームワーク)。
   const [pttJoined, setPttJoined] = useState(false);
   const [pttBusy, setPttBusy] = useState(false);
@@ -412,8 +416,6 @@ export default function App() {
     }
   }, [setMic, clearAutoOff]);
 
-  // 接続中だけイヤホンのハードボタンを購読する。
-  useRemotePtt(toggleMic, connected);
 
   // PTTのシステム音声セッション(AVAudioSession)が実際に有効になるまで待つ。
   // 実機ログで、待ち時間が700msだと間に合わず(onActivateAudioが1秒以上後に
@@ -696,6 +698,25 @@ export default function App() {
     logDebug("BLEボタン: 押下(未接続のため無視)");
   }, [logDebug, toggleMic]);
 
+  // イヤホン/BLEリモコンの物理ボタンを購読する。押下は handleBlePress と同じ
+  // 経路(PTT優先)でトグルするため、ロック中・ポケットの中でも送信できる。
+  useRemotePtt(handleBlePress, connected);
+
+  // イヤホンボタンの有効/無効をネイティブへ反映する。
+  useEffect(() => {
+    if (!RemotePtt?.setMediaButtonEnabled) return;
+    try {
+      RemotePtt.setMediaButtonEnabled(earbudButtonOn);
+      logDebug(
+        earbudButtonOn
+          ? "イヤホンのボタン: 送信トグルに割当て(ロック画面のトークボタンは非表示になります)"
+          : "イヤホンのボタン: 割当て解除",
+      );
+    } catch (e) {
+      logDebug(`イヤホンのボタン設定に失敗 ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [earbudButtonOn, logDebug]);
+
   // BLEボタンのイベント購読 + 起動時の接続維持開始。
   useEffect(() => {
     if (!BleButton) return;
@@ -887,6 +908,24 @@ export default function App() {
                 </Pressable>
               </>
             )}
+
+            <Text style={[styles.cardLabel, { marginTop: 16 }]}>
+              🎧 イヤホンのボタンで送信する
+            </Text>
+            <Pressable
+              style={[styles.toggle, earbudButtonOn && styles.toggleOn]}
+              onPress={() => setEarbudButtonOn((v) => !v)}
+            >
+              <Text style={[styles.toggleText, earbudButtonOn && styles.toggleTextOn]}>
+                {earbudButtonOn ? "✅ ON — イヤホンのボタンで送信" : "OFF — タップで有効にする"}
+              </Text>
+            </Pressable>
+            <Text style={styles.hint}>
+              Bluetoothイヤホンの再生/一時停止ボタンを「送信の開始/停止」に割り当てます。
+              ポケットにスマホを入れたまま、イヤホンのボタンを押すだけで話せます。
+              {"\n"}⚠️ ONのあいだは、ロック画面の【青いPTT表示（トークボタン）】は出なくなります
+              （iOSがこのアプリを音楽再生中として扱うため）。どちらが使いやすいか試して決めてください。
+            </Text>
 
             <Text style={[styles.cardLabel, { marginTop: 16 }]}>
               🔘 BLEボタン（iTag型・ロック中もOK）
