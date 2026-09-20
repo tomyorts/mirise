@@ -146,12 +146,28 @@ export default function App() {
           logDebug("AudioEngine: stopAudioSession完了");
         } else if (newState.isRecordingEnabled || newState.isPlayoutEnabled) {
           logDebug("AudioEngine: setAppleAudioConfiguration開始");
-          await AudioSession.setAppleAudioConfiguration({
-            audioCategory: "playAndRecord",
-            audioMode: "voiceChat",
-            audioCategoryOptions: ["allowBluetooth", "allowBluetoothA2DP"],
-          });
-          logDebug("AudioEngine: setAppleAudioConfiguration完了");
+          try {
+            // voiceChatモードは通話用(HFP)を前提とするため、音楽再生用の
+            // allowBluetoothA2DP を一緒に渡すとBluetooth機器接続時に
+            // OSStatus -50(パラメータ不正)で拒否される。HFPはvoiceChatが
+            // 暗黙に有効化するので allowBluetooth だけで足りる。
+            await AudioSession.setAppleAudioConfiguration({
+              audioCategory: "playAndRecord",
+              audioMode: "voiceChat",
+              audioCategoryOptions: ["allowBluetooth"],
+            });
+            logDebug("AudioEngine: setAppleAudioConfiguration完了");
+          } catch (configError) {
+            // PushToTalkフレームワークが音声セッションを保持している間は、
+            // アプリ側からのカテゴリ変更が拒否されることがある。その場合
+            // セッションは既にPTT側で適切に構成済みなので、失敗しても
+            // 処理を止めずに続行する(ここでthrowすると送信自体が始まらない)。
+            logDebug(
+              `AudioEngine: カテゴリ設定をスキップ(${
+                configError instanceof Error ? configError.message : String(configError)
+              })`,
+            );
+          }
           if (!oldState.isPlayoutEnabled && !oldState.isRecordingEnabled) {
             logDebug("AudioEngine: startAudioSession開始");
             await AudioSession.startAudioSession();
