@@ -25,6 +25,11 @@ export type PttChannelModuleType = {
   beginTransmitting(): Promise<void>;
   /** 送信停止 */
   endTransmitting(): Promise<void>;
+  /**
+   * イヤホンのボタンをPTTの送信操作に割り当てるか(iOS17+、旧ビルドには無い)。
+   * アプリ側でメディアボタンを横取りする方式と併用しないよう排他制御に使う。
+   */
+  setAccessoryButtonEnabled?: (enabled: boolean) => Promise<void>;
   addListener(
     event: PttChannelEvent,
     listener: (payload: Record<string, unknown>) => void,

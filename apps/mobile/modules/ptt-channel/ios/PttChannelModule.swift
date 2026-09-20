@@ -72,6 +72,15 @@ public class PttChannelModule: Module {
     AsyncFunction("endTransmitting") { () async throws in
       if #available(iOS 16.0, *) { await self.endImpl() }
     }
+
+    // アクセサリ(イヤホン)のボタンをPTTの送信操作に割り当てるかを実行中に切り替える。
+    // アプリ側でメディアボタンを横取りする方式と併用すると、1回の押下で
+    // 二重に反応してしまうため、どちらか一方だけを有効にするために使う。
+    AsyncFunction("setAccessoryButtonEnabled") { (enabled: Bool) async throws in
+      if #available(iOS 17.0, *) {
+        try await self.setAccessoryEnabledImpl(enabled)
+      }
+    }
   }
 
   fileprivate func emit(_ name: String, _ payload: [String: Any] = [:]) {
@@ -154,6 +163,14 @@ public class PttChannelModule: Module {
   // 壊れ、無関係な下の行にまで偽のエラーが連鎖するので注意。
   fileprivate static func makeChannelImage() -> UIImage? {
     return UIImage(systemName: "mic.circle.fill")
+  }
+
+  @available(iOS 17.0, *)
+  private func setAccessoryEnabledImpl(_ enabled: Bool) async throws {
+    guard let uuid = channelUUID else { return }
+    let m = try await manager()
+    try await m.setAccessoryButtonEventsEnabled(enabled, channelUUID: uuid)
+    emit("onAccessoryButton", ["enabled": enabled])
   }
 
   @available(iOS 16.0, *)

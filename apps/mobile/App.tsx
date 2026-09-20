@@ -702,19 +702,30 @@ export default function App() {
   // 経路(PTT優先)でトグルするため、ロック中・ポケットの中でも送信できる。
   useRemotePtt(handleBlePress, connected);
 
-  // イヤホンボタンの有効/無効をネイティブへ反映する。
+  // イヤホンのボタンをどちらの経路で受けるかを切り替える。
+  // 2つの経路を同時に有効にすると1回の押下で二重に反応してしまうため、
+  // 必ずどちらか一方だけを有効にする(排他)。
+  //   OFF: Apple公式経路(PTTがボタンを直接受ける)。ロック画面のトークボタンも残るが、
+  //        音楽アプリが「再生」の主導権を持っていると音楽も一緒に鳴ってしまう。
+  //   ON : アプリがメディアボタンの主導権を奪って受ける。音楽は鳴らなくなるが、
+  //        ロック画面のトークボタンは出なくなる。
   useEffect(() => {
-    if (!RemotePtt?.setMediaButtonEnabled) return;
-    try {
-      RemotePtt.setMediaButtonEnabled(earbudButtonOn);
-      logDebug(
-        earbudButtonOn
-          ? "イヤホンのボタン: 送信トグルに割当て(ロック画面のトークボタンは非表示になります)"
-          : "イヤホンのボタン: 割当て解除",
-      );
-    } catch (e) {
-      logDebug(`イヤホンのボタン設定に失敗 ${e instanceof Error ? e.message : String(e)}`);
-    }
+    void (async () => {
+      try {
+        // 先に旧経路を止めてから新経路を有効にする(二重反応を防ぐ)。
+        if (earbudButtonOn) {
+          await PttChannel?.setAccessoryButtonEnabled?.(false);
+          RemotePtt?.setMediaButtonEnabled?.(true);
+          logDebug("イヤホンのボタン: アプリが主導権を取得(音楽は鳴りません／ロック画面のトークボタンは非表示)");
+        } else {
+          RemotePtt?.setMediaButtonEnabled?.(false);
+          await PttChannel?.setAccessoryButtonEnabled?.(true);
+          logDebug("イヤホンのボタン: Apple公式経路(ロック画面のトークボタンも使えます)");
+        }
+      } catch (e) {
+        logDebug(`イヤホンのボタン切替に失敗 ${e instanceof Error ? e.message : String(e)}`);
+      }
+    })();
   }, [earbudButtonOn, logDebug]);
 
   // BLEボタンのイベント購読 + 起動時の接続維持開始。
@@ -921,10 +932,12 @@ export default function App() {
               </Text>
             </Pressable>
             <Text style={styles.hint}>
-              Bluetoothイヤホンの再生/一時停止ボタンを「送信の開始/停止」に割り当てます。
-              ポケットにスマホを入れたまま、イヤホンのボタンを押すだけで話せます。
-              {"\n"}⚠️ ONのあいだは、ロック画面の【青いPTT表示（トークボタン）】は出なくなります
-              （iOSがこのアプリを音楽再生中として扱うため）。どちらが使いやすいか試して決めてください。
+              イヤホンのボタンで送信を開始/停止できます。どちらの受け取り方にするか選べます。
+              {"\n"}【OFF】Apple公式の方式。ロック画面のトークボタンも使えますが、
+              音楽アプリが起動していると、ボタンを押したときに音楽も一緒に鳴ってしまいます。
+              {"\n"}【ON】このアプリがボタンを優先的に受け取ります。音楽は鳴りません。
+              代わりにロック画面のトークボタンは出なくなります。
+              {"\n"}※音楽が鳴って困る場合はONにしてください（診療中の誤再生を防げます）。
             </Text>
 
             <Text style={[styles.cardLabel, { marginTop: 16 }]}>
