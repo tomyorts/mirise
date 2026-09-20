@@ -510,8 +510,8 @@ export default function App() {
         logDebug("PTTイベント: onLeave");
         setPttJoined(false);
       }),
-      PttChannel.addListener("onBeginTransmitting", () => {
-        logDebug("PTTイベント: onBeginTransmitting");
+      PttChannel.addListener("onBeginTransmitting", (payload) => {
+        logDebug(`PTT送信開始: ${(payload?.source as string) ?? "不明"}`);
         // 切り忘れ防止タイマーは「送信開始が実際に確定した」この時点で張る。
         // 押下時(要求時)に張ると、要求が失敗した場合にタイマーだけが残り、
         // 30秒後に無関係な送信(ロック画面の長押しなど)を勝手に切ってしまう。
@@ -524,8 +524,8 @@ export default function App() {
         }
         void pttTransmitStart();
       }),
-      PttChannel.addListener("onEndTransmitting", () => {
-        logDebug("PTTイベント: onEndTransmitting");
+      PttChannel.addListener("onEndTransmitting", (payload) => {
+        logDebug(`PTT送信停止: ${(payload?.source as string) ?? "不明"}`);
         // BLEトグルの意図・タイマーは、どの経路で終了しても確実にリセットする。
         bleTxIntentRef.current = false;
         bleToggleInitiatedRef.current = false;
@@ -553,6 +553,15 @@ export default function App() {
       PttChannel.addListener("onDeactivateAudio", () => {
         logDebug("PTTイベント: onDeactivateAudio");
         audioActiveRef.current = false;
+      }),
+      PttChannel.addListener("onAccessoryButton", (payload) => {
+        // イヤホン等のボタンを送信操作に割り当てられたか(iOS17+)。
+        // これが有効なら、ポケットに入れたままイヤホンのボタンで送信できる。
+        if (payload?.enabled) {
+          logDebug("イヤホンのボタン: 送信操作に割当て成功");
+        } else {
+          logDebug(`イヤホンのボタン: 割当て不可 ${(payload?.error as string) ?? ""}`);
+        }
       }),
       PttChannel.addListener("onError", (payload) => {
         logDebug(`PTTイベント: onError ${JSON.stringify(payload)}`);
@@ -828,10 +837,14 @@ export default function App() {
               {RemotePtt?.buildTag ?? "（旧ビルド）"} / iOS {String(Platform.Version)}（診断用）
             </Text>
             <Text style={styles.hint}>
-              使い方: 「PTTを有効化」→ 画面ONのときは下の「話す」ボタン。
-              {"\n"}🔒 ロック中は、画面上部の【青いPTT表示（Dynamic Island）】をタップ →
-              システムの「トーク」ボタンを長押しで話せます。切断されていても自動で再接続します
-              （繋がるまで1〜3秒かかるので、押してひと呼吸おいてから話し始めてください）。
+              使い方:「PTTを有効化」を1回押しておけば準備完了です。
+              {"\n"}🎧 いちばん確実な使い方: Bluetoothイヤホンを接続し、
+              【イヤホンのボタンを押して話す】。スマホはポケットに入れたままでOK、
+              取り出す必要も画面を触る必要もありません（iOS17以降）。
+              {"\n"}🔒 イヤホンが無いときは、画面上部の【青いPTT表示（Dynamic Island）】をタップ →
+              システムの「トーク」ボタンを長押し。
+              {"\n"}切断されていても自動で再接続します（繋がるまで1〜3秒かかるので、
+              押してひと呼吸おいてから話し始めてください）。
             </Text>
 
             {!pttJoined ? (

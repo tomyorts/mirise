@@ -8,6 +8,7 @@ export type PttChannelEvent =
   | "onActivateAudio"
   | "onDeactivateAudio"
   | "onPushToken"
+  | "onAccessoryButton"
   | "onError";
 
 export type PttChannelModuleType = {

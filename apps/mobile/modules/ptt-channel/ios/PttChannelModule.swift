@@ -25,6 +25,7 @@ public class PttChannelModule: Module {
       "onActivateAudio",
       "onDeactivateAudio",
       "onPushToken",
+      "onAccessoryButton",
       "onError"
     )
 
@@ -118,6 +119,30 @@ public class PttChannelModule: Module {
     channelUUID = uuid
     let descriptor = PTChannelDescriptor(name: name, image: PttChannelModule.makeChannelImage())
     try await m.requestJoinChannel(channelUUID: uuid, descriptor: descriptor)
+
+    // 核心: Bluetoothイヤホン等のアクセサリのボタンを、送信の開始/終了に
+    // マッピングするようシステムへ要求する(iOS17+)。
+    // これを呼ばないとアクセサリのボタンは送信に結び付かない。
+    // 有効にすると、ポケットにスマホを入れたままイヤホンのボタンを押すだけで
+    // 送信できる(押下は didBeginTransmittingFrom に source=.handsfreeButton
+    // として届く)。既存の業務用インカムと同じ操作感を、追加のBLEボタン無しで
+    // 実現するための要のAPI。
+    if #available(iOS 17.0, *) {
+      do {
+        try await m.setAccessoryButtonEventsEnabled(true, channelUUID: uuid)
+        self.emit("onAccessoryButton", ["enabled": true])
+      } catch {
+        // 失敗してもチャンネル参加自体は成立しているので、参加は成功扱いにし、
+        // 画面の診断ログで分かるようにする(アクセサリ非対応端末など)。
+        self.emit("onAccessoryButton", [
+          "enabled": false,
+          "error": error.localizedDescription,
+        ])
+      }
+    } else {
+      self.emit("onAccessoryButton", ["enabled": false, "error": "iOS17以降が必要です"])
+    }
+
     return uuid.uuidString
   }
 
@@ -179,12 +204,24 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
     module?.emit("onLeave")
   }
 
+  // 送信の起点を文字列化する。どの操作で送信が始まったかを画面の診断ログで
+  // 確認できるようにする(特にイヤホンのボタン=handsfreeButtonの動作確認用)。
+  private func sourceName(_ source: PTChannelTransmitRequestSource) -> String {
+    switch source {
+    case .handsfreeButton: return "イヤホンのボタン"
+    case .userRequest: return "システムUIのトークボタン"
+    case .developerRequest: return "アプリ内のボタン"
+    case .unknown: return "不明"
+    @unknown default: return "その他"
+    }
+  }
+
   func channelManager(_ channelManager: PTChannelManager, channelUUID: UUID, didBeginTransmittingFrom source: PTChannelTransmitRequestSource) {
-    module?.emit("onBeginTransmitting")
+    module?.emit("onBeginTransmitting", ["source": sourceName(source)])
   }
 
   func channelManager(_ channelManager: PTChannelManager, channelUUID: UUID, didEndTransmittingFrom source: PTChannelTransmitRequestSource) {
-    module?.emit("onEndTransmitting")
+    module?.emit("onEndTransmitting", ["source": sourceName(source)])
   }
 
   func channelManager(_ channelManager: PTChannelManager, didActivate audioSession: AVAudioSession) {
