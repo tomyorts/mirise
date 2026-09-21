@@ -32,7 +32,7 @@ public class RemotePttModule: Module {
 
     // どのネイティブビルドが実機に入っているかを判別するためのタグ。
     Constants([
-      "buildTag": "earbud-2"
+      "buildTag": "earbud-3"
     ])
 
     // 購読を開始する。

@@ -76,10 +76,6 @@ export default function App() {
   // 受信音をスピーカーで鳴らすか(true)、受話口/イヤホン側に寄せるか(false)。
   // 既定はスピーカー: 私物スマホをポケットに入れたままでも聞こえるようにするため。
   const [speakerOn, setSpeakerOn] = useState(true);
-  // イヤホンの再生/一時停止ボタンを送信トグルとして使うか。
-  // 有効にするとロック画面のPTTトークボタンは出なくなるトレードオフがあるため、
-  // 画面から切り替えられるようにして実機で比較できるようにする。
-  const [earbudButtonOn, setEarbudButtonOn] = useState(false);
   // Phase B: ポケット/バックグラウンド送信(PushToTalkフレームワーク)。
   const [pttJoined, setPttJoined] = useState(false);
   const [pttBusy, setPttBusy] = useState(false);
@@ -706,31 +702,22 @@ export default function App() {
   // 経路(PTT優先)でトグルするため、ロック中・ポケットの中でも送信できる。
   useRemotePtt(handleBlePress, connected);
 
-  // イヤホンのボタンをどちらの経路で受けるかを切り替える。
-  // 2つの経路を同時に有効にすると1回の押下で二重に反応してしまうため、
-  // 必ずどちらか一方だけを有効にする(排他)。
-  //   OFF: Apple公式経路(PTTがボタンを直接受ける)。ロック画面のトークボタンも残るが、
-  //        音楽アプリが「再生」の主導権を持っていると音楽も一緒に鳴ってしまう。
-  //   ON : アプリがメディアボタンの主導権を奪って受ける。音楽は鳴らなくなるが、
-  //        ロック画面のトークボタンは出なくなる。
+  // イヤホンのボタンは常にApple公式経路(PushToTalkが直接受け取る)で扱う。
+  // アプリ側でメディアボタンを横取りする方式も試したが、iOSは「音楽を再生して
+  // いるアプリ」にしかメディアボタンの主導権を渡さず、通話用の音声セッションでは
+  // 主導権を取れないため機能しなかった(実機で確認)。
+  // PTT参加時に有効化しているが、取りこぼしを防ぐため参加状態になった時にも
+  // 明示的に有効化し直す。
   useEffect(() => {
+    if (!pttJoined) return;
     void (async () => {
       try {
-        // 先に旧経路を止めてから新経路を有効にする(二重反応を防ぐ)。
-        if (earbudButtonOn) {
-          await PttChannel?.setAccessoryButtonEnabled?.(false);
-          RemotePtt?.setMediaButtonEnabled?.(true);
-          logDebug("イヤホンのボタン: アプリが主導権を取得(音楽は鳴りません／ロック画面のトークボタンは非表示)");
-        } else {
-          RemotePtt?.setMediaButtonEnabled?.(false);
-          await PttChannel?.setAccessoryButtonEnabled?.(true);
-          logDebug("イヤホンのボタン: Apple公式経路(ロック画面のトークボタンも使えます)");
-        }
+        await PttChannel?.setAccessoryButtonEnabled?.(true);
       } catch (e) {
-        logDebug(`イヤホンのボタン切替に失敗 ${e instanceof Error ? e.message : String(e)}`);
+        logDebug(`イヤホンのボタン有効化に失敗 ${e instanceof Error ? e.message : String(e)}`);
       }
     })();
-  }, [earbudButtonOn, logDebug]);
+  }, [pttJoined, logDebug]);
 
   // BLEボタンのイベント購読 + 起動時の接続維持開始。
   useEffect(() => {
@@ -890,6 +877,7 @@ export default function App() {
             </Text>
             <Text style={styles.hint}>
               使い方:「PTTを有効化」を1回押しておけば準備完了です。
+              {"\n"}※ボタンが効かなくなったら、一度「PTTを無効化（退出）」→「PTTを有効化」で復帰します。
               {"\n"}🎧 いちばん確実な使い方: Bluetoothイヤホンを接続し、
               【イヤホンのボタンを押して話す】。スマホはポケットに入れたままでOK、
               取り出す必要も画面を触る必要もありません（iOS17以降）。
@@ -923,26 +911,6 @@ export default function App() {
                 </Pressable>
               </>
             )}
-
-            <Text style={[styles.cardLabel, { marginTop: 16 }]}>
-              🎧 イヤホンのボタンで送信する
-            </Text>
-            <Pressable
-              style={[styles.toggle, earbudButtonOn && styles.toggleOn]}
-              onPress={() => setEarbudButtonOn((v) => !v)}
-            >
-              <Text style={[styles.toggleText, earbudButtonOn && styles.toggleTextOn]}>
-                {earbudButtonOn ? "✅ ON — イヤホンのボタンで送信" : "OFF — タップで有効にする"}
-              </Text>
-            </Pressable>
-            <Text style={styles.hint}>
-              イヤホンのボタンで送信を開始/停止できます。どちらの受け取り方にするか選べます。
-              {"\n"}【OFF】Apple公式の方式。ロック画面のトークボタンも使えますが、
-              音楽アプリが起動していると、ボタンを押したときに音楽も一緒に鳴ってしまいます。
-              {"\n"}【ON】このアプリがボタンを優先的に受け取ります。音楽は鳴りません。
-              代わりにロック画面のトークボタンは出なくなります。
-              {"\n"}※音楽が鳴って困る場合はONにしてください（診療中の誤再生を防げます）。
-            </Text>
 
             <Text style={[styles.cardLabel, { marginTop: 16 }]}>
               🔘 BLEボタン（iTag型・ロック中もOK）
