@@ -157,7 +157,8 @@ function buildIdentity(displayName: string, tag: string): string {
     .trim()
     .replace(/[\s\u3000]+/g, "_")
     .replace(IDENTITY_DISALLOWED, "")
-    .slice(0, 40);
+    .slice(0, 40)
+    .replace(/[\uD800-\uDBFF]$/, ""); // 「𠮷」などが40文字目で半分に割れたら除く(サーバーが拒否するため)
   return `${base || "staff"}-${tag}`;
 }
 
