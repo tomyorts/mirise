@@ -18,7 +18,7 @@ import {
   AudioEngineMuteMode,
   audioDeviceModuleEvents,
 } from "@livekit/react-native-webrtc";
-import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
+import { ConnectionState, DisconnectReason, Room, RoomEvent, Track } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
 import BleButton, { type BleButtonStatus } from "./modules/ble-button";
 import PttChannel, { PTT_SOURCE } from "./modules/ptt-channel";
@@ -194,6 +194,50 @@ function nativePttJoined(): boolean {
   }
 }
 
+// トークン取得の上限時間。院内Wi-Fiが「繋がっているのにインターネットに出られ
+// ない」状態や、Wi-Fi↔LTEの切替中は、上限が無いとiOS既定の60秒待ち続け、
+// その間のイヤホン押下がすべて「送信中なのに無音」になる。
+const TOKEN_TIMEOUT_MS = 8_000;
+// イヤホン押下からの再接続を待つ上限。超えたらこの送信は諦めて「送信中」表示を
+// 消す(接続自体は裏で続けてよい。繋がれば受信はできる)。
+const RECONNECT_TIMEOUT_MS = 12_000;
+
+async function fetchToken(body: {
+  identity: string;
+  name: string;
+  room: string;
+}): Promise<{ token: string; url: string }> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (INTERCOM_KEY) headers["x-intercom-key"] = INTERCOM_KEY;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TOKEN_TIMEOUT_MS);
+  try {
+    const response = await fetch(TOKEN_ENDPOINT, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let data: { token?: string; url?: string; error?: string } = {};
+    try {
+      data = JSON.parse(text) as typeof data;
+    } catch {
+      // サーバーがHTMLのエラーページを返した場合など。下でHTTPステータスと共に扱う。
+    }
+    if (!response.ok || !data.token || !data.url) {
+      const err = new Error(
+        data.error ?? `トークン取得に失敗しました(HTTP ${response.status})`,
+      ) as Error & { status?: number };
+      err.status = response.status;
+      throw err;
+    }
+    return { token: data.token, url: data.url };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export default function App() {
   const roomRef = useRef<Room | null>(null);
   // スタッフ名(画面表示用)とルーム。前回の値を端末から復元する。
@@ -231,6 +275,12 @@ export default function App() {
   // 押してから1秒以上遅れて届くことがあり、その間に指を離していた場合は
   // 確定した瞬間に即終了させる(誰も押していないのにマイクが開く事故の防止)。
   const screenHoldRef = useRef(false);
+  // 勤務中(=接続を保ちたい)か。電波が途切れて切断された時に、画面を開いたら
+  // 自動で再接続するかどうかの判断に使う。退勤で false に戻る。
+  const wantConnectedRef = useRef(false);
+  // 送信開始処理の世代番号。再接続がタイムアウトした時に、その後に始まった
+  // 新しい送信まで誤って止めないようにする。
+  const txGenRef = useRef(0);
   // BLEトグルの「意図」。txActiveRefは送信開始イベントが往復してから立つため、
   // 開始確定前の2度目の押下を「停止」と判定するにはこちらが必要
   // (これが無いと、素早い2度押しが停止でなく再開始になる=止めたつもりで止まらない)。
@@ -416,33 +466,34 @@ export default function App() {
           console.warn("audio route config skipped", audioConfigError);
         }
 
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (INTERCOM_KEY) headers["x-intercom-key"] = INTERCOM_KEY;
-        const response = await fetch(TOKEN_ENDPOINT, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            identity: buildIdentity(displayName, getDeviceTag()),
-            name: displayName,
-            room,
-          }),
+        const data = await fetchToken({
+          identity: buildIdentity(displayName, getDeviceTag()),
+          name: displayName,
+          room,
         });
-        const data = (await response.json()) as {
-          token?: string;
-          url?: string;
-          error?: string;
-        };
-        if (!response.ok || !data.token || !data.url) {
-          throw new Error(data.error ?? "トークン取得に失敗しました");
-        }
         logDebug(`connect: トークン取得OK(+${Date.now() - startedAt}ms)`);
 
         const lkRoom = new Room();
         roomRef.current = lkRoom;
-        lkRoom.on(RoomEvent.Disconnected, () => {
-          logDebug("room: Disconnectedイベント");
+        lkRoom.on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+          // 作り直し前の古い接続から遅れて届いたイベントは無視する。
+          if (roomRef.current !== lkRoom) return;
+          const reasonName =
+            reason === undefined ? "不明" : (DisconnectReason[reason] ?? String(reason));
+          logDebug(`room: 切断(${reasonName})`);
           setConnected(false);
           setMicOn(false);
+          // 自分で切った場合(退勤・再接続のための作り直し)は何も表示しない。
+          if (reason === DisconnectReason.CLIENT_INITIATED) return;
+          if (reason === DisconnectReason.DUPLICATE_IDENTITY) {
+            // 同じIDの別の接続に置き換えられた。自動再接続すると取り合いになる。
+            wantConnectedRef.current = false;
+            setError("同じ端末の別の接続に切り替わったため切断されました。「再接続する」を押してください");
+            return;
+          }
+          // LiveKitが自動再接続を諦めた(レントゲン室など電波の届かない場所に
+          // 1分以上いた等)。以前は何も表示せず、受信が止まったままになっていた。
+          setError("通信が途切れました。画面を開くか、イヤホンのボタンを押すと自動で再接続します");
         });
         // サーバーが実際に計測した「自分の声の音量」。これが記録されれば、
         // 音声が確実にサーバーまで届いている証拠になる(ローカルの状態だけでは分からない)。
@@ -468,6 +519,7 @@ export default function App() {
         setConnected(true);
         setMicOn(false);
         lastAliveRef.current = Date.now();
+        wantConnectedRef.current = true;
         // 次回起動時(バックグラウンド再起動を含む)に同じ名前・ルームで入れるよう保存。
         writeSettings({
           [SETTINGS_KEYS.displayName]: displayName,
@@ -603,6 +655,7 @@ export default function App() {
   // 離された後にマイクONが発動する事故(ホットマイク)を防ぐ。
   const pttTransmitStart = useCallback(async () => {
     txActiveRef.current = true;
+    const gen = ++txGenRef.current;
 
     // JSが休止していた直後は、見かけ上「接続中」でも実際は切れていることがある。
     // ハートビートの空白が大きければ接続を信用せず作り直す。
@@ -648,7 +701,21 @@ export default function App() {
     }
 
     logDebug("PTT: 再接続経路");
-    const ok = await connect();
+    let raceTimer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      connect(),
+      new Promise<"timeout">((resolve) => {
+        raceTimer = setTimeout(() => resolve("timeout"), RECONNECT_TIMEOUT_MS);
+      }),
+    ]);
+    if (raceTimer) clearTimeout(raceTimer);
+    if (result === "timeout") {
+      // この送信は諦めてシステムの「送信中」表示を消す(無音のまま送信中が
+      // 続くのを防ぐ)。後から別の送信が始まっていれば、そちらは止めない。
+      if (txGenRef.current === gen) await abortTransmit("再接続タイムアウト");
+      return;
+    }
+    const ok = result;
     logDebug(`PTT: connect結果=${ok}`);
     if (!ok) {
       await abortTransmit("再接続失敗");
@@ -834,6 +901,7 @@ export default function App() {
   // 自動で再接続して診療室にマイクが開いてしまっていた。
   const endShift = useCallback(async () => {
     logDebug("退勤: 開始");
+    wantConnectedRef.current = false;
     txActiveRef.current = false;
     bleTxIntentRef.current = false;
     bleToggleInitiatedRef.current = false;
@@ -973,16 +1041,28 @@ export default function App() {
   // iOSがアプリを終了→PushToTalkがチャンネルを復元した場合、JSは未参加の状態で
   // 始まるが実際にはイヤホンのボタンが生きている。これを反映しないと、画面上は
   // 「勤務外」なのにイヤホンで送信できてしまい、退勤ボタンも出ない。
+  // あわせて、勤務中なのに切断されていれば自動で再接続する(前面にある時だけ。
+  // バックグラウンドで接続するとマイクのウォームアップが走るため行わない)。
   useEffect(() => {
-    const sync = () => {
-      if (nativePttJoined()) setPttJoined(true);
+    const onActive = () => {
+      if (nativePttJoined()) {
+        setPttJoined(true);
+        // PTTチャンネルに参加中=勤務中。iOSがアプリを終了→復元した場合も含む。
+        wantConnectedRef.current = true;
+      }
+      const room = roomRef.current;
+      const disconnected = !room || room.state === ConnectionState.Disconnected;
+      if (wantConnectedRef.current && disconnected && !connectPromiseRef.current) {
+        logDebug("前面復帰: 勤務中のため自動で再接続");
+        void connect();
+      }
     };
-    sync();
+    if (AppState.currentState === "active") onActive();
     const sub = AppState.addEventListener("change", (state) => {
-      if (state === "active") sync();
+      if (state === "active") onActive();
     });
     return () => sub.remove();
-  }, []);
+  }, [connect, logDebug]);
 
   // BLEボタンのイベント購読 + 起動時の接続維持開始。
   useEffect(() => {
