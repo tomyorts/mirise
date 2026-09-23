@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import type { IntercomRoom } from "../lib/rooms";
+import { BROADCAST_ROOM_ID, INTERCOM_ROOMS, type IntercomRoom } from "../lib/rooms";
 
 type StaffMember = { name: string; role: string };
 
@@ -45,7 +45,16 @@ export function AdminClient() {
         const response = await fetch("/api/admin");
         const data = (await response.json()) as AdminData & { error?: string };
         if (!response.ok) throw new Error(data.error ?? "読み込みに失敗しました");
-        setRooms(data.rooms);
+        // 緊急呼び出しに使う全体ルームが無い場合は戻しておく(保存すると反映)。
+        const broadcastRoom = INTERCOM_ROOMS.find((room) => room.id === BROADCAST_ROOM_ID);
+        if (broadcastRoom && !data.rooms.some((room) => room.id === BROADCAST_ROOM_ID)) {
+          setRooms([...data.rooms, { ...broadcastRoom }]);
+          setMessage(
+            "緊急呼び出しに使う全体ルームが見つからなかったため、一覧に戻しました。「保存する」を押すと反映されます。"
+          );
+        } else {
+          setRooms(data.rooms);
+        }
         setStaff(data.staff);
         setStoreConfigured(data.storeConfigured);
       } catch (err) {
@@ -57,11 +66,24 @@ export function AdminClient() {
   }, []);
 
   const updateRoom = (index: number, patch: Partial<IntercomRoom>) => {
-    setRooms((prev) => prev.map((room, i) => (i === index ? { ...room, ...patch } : room)));
+    setRooms((prev) =>
+      prev.map((room, i) => {
+        if (i !== index) return room;
+        if (patch.id !== undefined) {
+          // 全体ルーム(緊急呼び出し用)の ID は変更できない。
+          // また、ほかのルームに全体ルームの ID(all) は付けられない。
+          if (room.id === BROADCAST_ROOM_ID || patch.id === BROADCAST_ROOM_ID) {
+            return { ...room, ...patch, id: room.id };
+          }
+        }
+        return { ...room, ...patch };
+      })
+    );
   };
 
   const removeRoom = (index: number) => {
-    setRooms((prev) => prev.filter((_, i) => i !== index));
+    // 全体ルーム(緊急呼び出し用)は削除できない。
+    setRooms((prev) => prev.filter((room, i) => i !== index || room.id === BROADCAST_ROOM_ID));
   };
 
   const addRoom = () => {
@@ -174,16 +196,28 @@ export function AdminClient() {
                 value={room.id}
                 onChange={(event) => updateRoom(index, { id: event.target.value })}
                 placeholder="clinic"
+                readOnly={room.id === BROADCAST_ROOM_ID}
+                title={
+                  room.id === BROADCAST_ROOM_ID
+                    ? "緊急呼び出しに使う全体ルームのため、IDは変更できません"
+                    : undefined
+                }
               />
             </label>
-            <button className="adminRemoveBtn" onClick={() => removeRoom(index)} title="削除">
-              削除
-            </button>
+            {room.id === BROADCAST_ROOM_ID ? (
+              <span className="adminLockedTag" title="緊急呼び出しに使う全体ルームのため削除できません">
+                削除不可（緊急用）
+              </span>
+            ) : (
+              <button className="adminRemoveBtn" onClick={() => removeRoom(index)} title="削除">
+                削除
+              </button>
+            )}
           </div>
         ))}
         <p className="hint">
           ※ ID は内部識別子です（英数字・ハイフン）。普段は「ルーム名」だけ変えればOK。
-          緊急用の全体ルームは ID を <code>all</code> にしておくと分かりやすいです。
+          緊急呼び出しに使う全体ルーム（ID: <code>all</code>）は、ID の変更と削除ができません（表示名は変更できます）。
         </p>
       </section>
 
