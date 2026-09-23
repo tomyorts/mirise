@@ -36,6 +36,19 @@ export type PttChannelModuleType = {
   ): EventSubscription;
 };
 
+/**
+ * 送信の起点(onBeginTransmitting / onEndTransmitting の payload.source)。
+ * PttChannelModule.swift の sourceName() が返す文字列と必ず一致させること。
+ * - handsfree: Bluetoothイヤホン等のボタン(PushToTalk の handsfreeButton)
+ * - systemUi : ロック画面/Dynamic Island のトークボタン(押している間だけ)
+ * - app      : アプリが beginTransmitting を呼んだもの(画面のボタン・BLEボタン)
+ */
+export const PTT_SOURCE = {
+  handsfree: "イヤホンのボタン",
+  systemUi: "システムUIのトークボタン",
+  app: "アプリ内のボタン",
+} as const;
+
 // iOS 16+ かつ開発ビルドでのみ存在。未対応環境では null。
 const PttChannel = requireOptionalNativeModule<PttChannelModuleType>("PttChannel");
 

@@ -20,11 +20,17 @@ import {
 import { ConnectionState, Room, RoomEvent, Track } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
 import BleButton, { type BleButtonStatus } from "./modules/ble-button";
-import PttChannel from "./modules/ptt-channel";
+import PttChannel, { PTT_SOURCE } from "./modules/ptt-channel";
 import RemotePtt from "./modules/remote-ptt";
 
 // 止め忘れ防止: トグルでONにしたら一定時間で自動OFF(ミリ秒)。
 const AUTO_OFF_MS = 30_000;
+// イヤホンのボタンで始めた送信の自動停止(ミリ秒)。イヤホンは「1回押すと開始、
+// もう1回で終了」のトグル動作なので、押し忘れ・ポケットの中での誤押下・機種に
+// よる再生/停止ボタンの誤反応で、マイクが開きっぱなしになり得る。診療室で患者の
+// 会話が流れ続ける事故を防ぐため、必ず上限を設ける。話し終える余裕を持たせて
+// BLEボタンより少し長めにしている。
+const EARPHONE_AUTO_OFF_MS = 45_000;
 
 // LiveKit(WebRTC)を使う前に一度だけグローバル初期化が必要。
 // autoConfigureAudioSession(既定true)は、WebRTCの録音/再生ON・OFFに合わせて
@@ -188,8 +194,12 @@ export default function App() {
   // 最新値参照用(BLE押下ハンドラはイベント購読内から呼ばれるため、stateを直接見ると古い値になる)。
   const pttJoinedRef = useRef(false);
   const connectedRef = useRef(false);
-  // BLEトグル送信の切り忘れ防止タイマー。
+  // 切り忘れ防止タイマー(BLEボタン起点とイヤホンのボタン起点の送信に使う)。
   const bleTxAutoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 画面の「話す」ボタンを今押しているか。送信開始の確定(onBeginTransmitting)は
+  // 押してから1秒以上遅れて届くことがあり、その間に指を離していた場合は
+  // 確定した瞬間に即終了させる(誰も押していないのにマイクが開く事故の防止)。
+  const screenHoldRef = useRef(false);
   // BLEトグルの「意図」。txActiveRefは送信開始イベントが往復してから立つため、
   // 開始確定前の2度目の押下を「停止」と判定するにはこちらが必要
   // (これが無いと、素早い2度押しが停止でなく再開始になる=止めたつもりで止まらない)。
@@ -654,16 +664,36 @@ export default function App() {
         setPttJoined(false);
       }),
       PttChannel.addListener("onBeginTransmitting", (payload) => {
-        logDebug(`PTT送信開始: ${(payload?.source as string) ?? "不明"}`);
+        const source = (payload?.source as string | undefined) ?? "不明";
+        logDebug(`PTT送信開始: ${source}`);
+        // アプリが要求した送信(画面のボタン/BLEボタン)なのに、確定した時点で
+        // 画面のボタンは離されており、BLEも送信の意図が無い(2度押しで取り消し
+        // 済み)なら、誰も話していない。マイクを開かずに即終了する。
+        if (
+          source === PTT_SOURCE.app &&
+          !screenHoldRef.current &&
+          !bleTxIntentRef.current
+        ) {
+          logDebug("PTT: 開始確定時には既に離されていた/取り消し済み → 即終了");
+          bleToggleInitiatedRef.current = false;
+          void PttChannel?.endTransmitting();
+          return;
+        }
         // 切り忘れ防止タイマーは「送信開始が実際に確定した」この時点で張る。
         // 押下時(要求時)に張ると、要求が失敗した場合にタイマーだけが残り、
         // 30秒後に無関係な送信(ロック画面の長押しなど)を勝手に切ってしまう。
-        if (bleToggleInitiatedRef.current) {
+        // 対象はトグル動作の起点(BLEボタン・イヤホンのボタン)のみ。画面の
+        // ボタンとロック画面のトークボタンは「押している間だけ」なので対象外。
+        const fromEarphone = source === PTT_SOURCE.handsfree;
+        if (bleToggleInitiatedRef.current || fromEarphone) {
           if (bleTxAutoOffRef.current) clearTimeout(bleTxAutoOffRef.current);
+          const byBle = bleToggleInitiatedRef.current;
           bleTxAutoOffRef.current = setTimeout(() => {
-            logDebug("BLEボタン: 自動停止(切り忘れ防止)");
+            logDebug(
+              byBle ? "BLEボタン: 自動停止(切り忘れ防止)" : "イヤホン: 自動停止(切り忘れ防止)",
+            );
             void PttChannel?.endTransmitting();
-          }, AUTO_OFF_MS);
+          }, byBle ? AUTO_OFF_MS : EARPHONE_AUTO_OFF_MS);
         }
         void pttTransmitStart();
       }),
@@ -772,11 +802,18 @@ export default function App() {
 
   // 「話す」ホールド: 押している間だけ送信(PTKit経由)。
   const pttPressIn = useCallback(() => {
-    void PttChannel?.beginTransmitting();
-  }, []);
+    screenHoldRef.current = true;
+    PttChannel?.beginTransmitting().catch((e) => {
+      screenHoldRef.current = false;
+      logDebug(`PTT: 開始失敗 ${e instanceof Error ? e.message : String(e)}`);
+    });
+  }, [logDebug]);
   const pttPressOut = useCallback(() => {
-    void PttChannel?.endTransmitting();
-  }, []);
+    screenHoldRef.current = false;
+    PttChannel?.endTransmitting().catch((e) => {
+      logDebug(`PTT: 停止失敗 ${e instanceof Error ? e.message : String(e)}`);
+    });
+  }, [logDebug]);
 
   // BLEボタン(iTag型)押下: 送信ON/OFFのトグル。
   // PTT参加中はPTKit経由(ロック中でも動く)。未参加で通常接続中なら従来のトグル。
