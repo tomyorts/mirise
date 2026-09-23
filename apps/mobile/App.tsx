@@ -169,6 +169,15 @@ function displayNameOf(p: { name?: string; identity: string }): string {
 }
 
 const DISPLAY_NAME_MAX = 32;
+// 表示名に使える文字(トークンAPIの検査と同じ: 文字・数字・空白・「・」「_」「-」「.」)。
+// 事前に確かめないと、サーバーで拒否されて「接続に失敗」になり原因が分かりにくい。
+let DISPLAY_NAME_ALLOWED: RegExp | null;
+try {
+  DISPLAY_NAME_ALLOWED = new RegExp("^[\\p{L}\\p{N}\\p{Zs}・_\\-.]+$", "u");
+} catch {
+  // Unicodeプロパティ指定が使えない環境では事前チェックを省く(サーバー側で検査される)。
+  DISPLAY_NAME_ALLOWED = null;
+}
 // 診断ログの保持行数。
 const DEBUG_LOG_MAX = 80;
 
@@ -554,6 +563,12 @@ export default function App() {
       }
       if (displayName.length > DISPLAY_NAME_MAX) {
         setError(`スタッフ名は${DISPLAY_NAME_MAX}文字以内で入力してください`);
+        return false;
+      }
+      if (DISPLAY_NAME_ALLOWED && !DISPLAY_NAME_ALLOWED.test(displayName)) {
+        setError(
+          "スタッフ名に使えない文字が含まれています（使える文字: 文字・数字・空白・「・」「_」「-」「.」）",
+        );
         return false;
       }
       logDebug(`connect: 開始(${displayName} / ${room})`);
@@ -1402,7 +1417,7 @@ export default function App() {
                 style={styles.input}
                 value={identity}
                 onChangeText={setIdentity}
-                placeholder="例: 佐藤 / DH田中"
+                placeholder="例: DH田中"
                 editable={!connecting}
                 autoCapitalize="none"
                 autoCorrect={false}
