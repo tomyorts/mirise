@@ -6,6 +6,7 @@ import {
   DISPLAY_NAME_MAX_LENGTH,
   DISPLAY_NAME_MESSAGES,
   DISPLAY_NAME_PATTERN,
+  sanitizeDisplayName,
 } from "@/app/lib/staffIdentity";
 
 // 表示名(画面に出る名前)。日本語名を想定して緩めに受け付ける。
@@ -28,12 +29,8 @@ const tokenRequestSchema = z.object(
       .min(2, "スタッフ名は2文字以上で入力してください")
       .max(64, "スタッフ名は64文字以内で入力してください")
       .regex(/^[\p{L}\p{N}_\-. ]+$/u, "スタッフ名に使用できない文字が含まれています"),
-    // name は省略可(旧バージョンのアプリは送らない)。空文字も「省略」とみなす。
-    name: z.preprocess(
-      (value) =>
-        value === null || (typeof value === "string" && value.trim() === "") ? undefined : value,
-      displayNameSchema.optional()
-    ),
+    // name は省略可(旧バージョンのアプリは送らない)。中身の検査は resolveDisplayName で行う。
+    name: z.unknown().optional(),
     room: z
       .string({
         required_error: "ルームを選択してください",
@@ -48,6 +45,23 @@ const tokenRequestSchema = z.object(
     invalid_type_error: "リクエストの形式が正しくありません",
   }
 );
+
+/**
+ * 表示名を決める。省略・空文字なら identity を使う。
+ * - PC画面(ログインセッション): 画面側と同じ規則で厳密に検査し、合わなければ 400。
+ * - iPhoneアプリ(APIキー): 名前の文字種を確かめない旧バージョンのアプリがまだ使われているため、
+ *   拒否はせず、使えない文字を除いた名前(それも無理なら identity)で接続させる。
+ *   例: 「佐藤(DH)」→「佐藤DH」。規則を確かめる新しいアプリが行き渡ったら厳密にしてよい。
+ */
+function resolveDisplayName(raw: unknown, identity: string, strict: boolean): string {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) {
+    return identity;
+  }
+  if (strict) return displayNameSchema.parse(raw);
+  const result = displayNameSchema.safeParse(raw);
+  if (result.success) return result.data;
+  return (typeof raw === "string" ? sanitizeDisplayName(raw) : null) ?? identity;
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -78,7 +92,8 @@ export async function POST(request: NextRequest) {
 
     const parsed = tokenRequestSchema.parse(body);
     const { identity, room } = parsed;
-    const name = parsed.name ?? identity;
+    // 名前を厳密に検査するのは、PC画面(ログインセッション)からのリクエストだけ。
+    const name = resolveDisplayName(parsed.name, identity, !!session && !authedByKey);
 
     const apiKey = process.env.LIVEKIT_API_KEY;
     const apiSecret = process.env.LIVEKIT_API_SECRET;

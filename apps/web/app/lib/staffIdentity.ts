@@ -26,15 +26,39 @@ export function validateDisplayName(displayName: string): string | null {
 }
 
 /**
+ * 文字列を UTF-16 の長さ maxLength までに切る。
+ * 切れ目で絵文字や「𠮷」などのサロゲートペアが半分に割れないよう、末尾に残った上位サロゲートは除く。
+ */
+function sliceWithoutBrokenPair(value: string, maxLength: number): string {
+  return value.slice(0, maxLength).replace(/[\uD800-\uDBFF]$/, "");
+}
+
+/**
  * 表示名と端末タグから identity を作る。
  * 結果は現在の本番 /api/token の identity 規則(/^[\p{L}\p{N}_\-. ]+$/u, 2〜64文字)を必ず満たす。
  */
 export function buildIdentity(displayName: string, tag: string): string {
-  const base = displayName
+  const cleaned = displayName
     .normalize("NFKC")
     .trim()
     .replace(/[\s　]+/g, "_") // 全角を含む空白 → "_"
-    .replace(/[^\p{L}\p{N}_\-.]/gu, "") // identity に使えない文字を除く
-    .slice(0, 40);
+    .replace(/[^\p{L}\p{N}_\-.]/gu, ""); // identity に使えない文字を除く
+  // NFKC で長くなる文字(ﬃ → ffi など)があるため 40 に切る。サロゲートペアは割らない。
+  const base = sliceWithoutBrokenPair(cleaned, 40);
   return `${base || "staff"}-${tag}`;
+}
+
+/**
+ * 規則に合わない表示名から使えない文字を除き、表示名として使える形にする(できなければ null)。
+ * 名前の文字種を確かめない旧バージョンのiPhoneアプリ向けに、/api/token でだけ使う。
+ * 例: 「佐藤(DH)」→「佐藤DH」
+ */
+export function sanitizeDisplayName(displayName: string): string | null {
+  const cleaned = displayName
+    .normalize("NFC")
+    .replace(/[\t\n\r\v\f\u2028\u2029]+/g, " ") // タブ・改行はスペースに
+    .replace(/[^\p{L}\p{N}\p{Zs}・_\-.]/gu, "")
+    .trim();
+  const result = sliceWithoutBrokenPair(cleaned, DISPLAY_NAME_MAX_LENGTH).trim();
+  return validateDisplayName(result) === null ? result : null;
 }

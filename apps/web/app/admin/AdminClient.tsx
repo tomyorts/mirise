@@ -1,10 +1,21 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BROADCAST_ROOM_ID, INTERCOM_ROOMS, type IntercomRoom } from "../lib/rooms";
+import { validateDisplayName } from "../lib/staffIdentity";
 
 type StaffMember = { name: string; role: string };
+
+// 画面で編集中のルーム。locked は緊急呼び出し用の全体ルーム(読み込んだ時点で ID が all の行)。
+// 入力途中の ID で判定しないよう、読み込み時に決めた印で扱う。
+type RoomRow = IntercomRoom & { rowKey: number; locked: boolean };
+
+// CSVのうち、スタッフ名の規則に合わず読み込めなかった行。
+type CsvIssue = { line: number; name: string; reason: string };
+
+const BROADCAST_ID_TAKEN_MESSAGE =
+  "「all」は緊急呼び出し用の全体ルームのIDのため、ほかのルームには使えません";
 
 type AdminData = {
   rooms: IntercomRoom[];
@@ -12,32 +23,62 @@ type AdminData = {
   storeConfigured: boolean;
 };
 
-function parseCsv(text: string): StaffMember[] {
+function parseCsv(text: string): { staff: StaffMember[]; issues: CsvIssue[] } {
   const lines = text.split(/\r?\n/);
   const staff: StaffMember[] = [];
-  for (const rawLine of lines) {
+  const issues: CsvIssue[] = [];
+  lines.forEach((rawLine, index) => {
     const line = rawLine.trim();
-    if (!line) continue;
+    if (!line) return;
     const cells = line.split(",").map((cell) => cell.trim());
     const name = cells[0] ?? "";
     const role = cells[1] ?? "";
-    if (!name) continue;
+    if (!name) return;
     // ヘッダー行(name,role / 名前,職種 等)はスキップ
-    if (["name", "名前", "氏名", "スタッフ名"].includes(name.toLowerCase())) continue;
-    staff.push({ name: name.slice(0, 64), role: role.slice(0, 40) });
-  }
-  return staff;
+    if (["name", "名前", "氏名", "スタッフ名"].includes(name.toLowerCase())) return;
+    // インカム画面・iPhoneアプリと同じ規則で確かめる(合わない名前は候補から選んでも接続できない)。
+    const reason = validateDisplayName(name);
+    if (reason) {
+      issues.push({ line: index + 1, name, reason });
+      return;
+    }
+    staff.push({ name, role: role.slice(0, 40) });
+  });
+  return { staff, issues };
 }
 
 export function AdminClient() {
-  const [rooms, setRooms] = useState<IntercomRoom[]>([]);
+  const [rooms, setRooms] = useState<RoomRow[]>([]);
   const [staff, setStaff] = useState<StaffMember[]>([]);
+  const [csvIssues, setCsvIssues] = useState<CsvIssue[]>([]);
+  const nextRowKeyRef = useRef(1);
   const [storeConfigured, setStoreConfigured] = useState(true);
   const [csvText, setCsvText] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+
+  const toRows = useCallback((list: IntercomRoom[]): RoomRow[] => {
+    let lockedAssigned = false;
+    return list.map((room) => {
+      const locked = !lockedAssigned && room.id === BROADCAST_ROOM_ID;
+      if (locked) lockedAssigned = true;
+      const rowKey = nextRowKeyRef.current;
+      nextRowKeyRef.current += 1;
+      return { ...room, rowKey, locked };
+    });
+  }, []);
+
+  // 登録済みのスタッフのうち、スタッフ名の規則に合わない人(以前の画面では登録できた)。
+  const invalidStaff = useMemo(
+    () =>
+      staff.flatMap((member, index) => {
+        const reason = validateDisplayName(member.name);
+        return reason ? [{ index, name: member.name, reason }] : [];
+      }),
+    [staff]
+  );
 
   useEffect(() => {
     (async () => {
@@ -48,12 +89,12 @@ export function AdminClient() {
         // 緊急呼び出しに使う全体ルームが無い場合は戻しておく(保存すると反映)。
         const broadcastRoom = INTERCOM_ROOMS.find((room) => room.id === BROADCAST_ROOM_ID);
         if (broadcastRoom && !data.rooms.some((room) => room.id === BROADCAST_ROOM_ID)) {
-          setRooms([...data.rooms, { ...broadcastRoom }]);
+          setRooms(toRows([...data.rooms, { ...broadcastRoom }]));
           setMessage(
             "緊急呼び出しに使う全体ルームが見つからなかったため、一覧に戻しました。「保存する」を押すと反映されます。"
           );
         } else {
-          setRooms(data.rooms);
+          setRooms(toRows(data.rooms));
         }
         setStaff(data.staff);
         setStoreConfigured(data.storeConfigured);
@@ -63,19 +104,15 @@ export function AdminClient() {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [toRows]);
 
   const updateRoom = (index: number, patch: Partial<IntercomRoom>) => {
     setRooms((prev) =>
       prev.map((room, i) => {
         if (i !== index) return room;
-        if (patch.id !== undefined) {
-          // 全体ルーム(緊急呼び出し用)の ID は変更できない。
-          // また、ほかのルームに全体ルームの ID(all) は付けられない。
-          if (room.id === BROADCAST_ROOM_ID || patch.id === BROADCAST_ROOM_ID) {
-            return { ...room, ...patch, id: room.id };
-          }
-        }
+        // 全体ルーム(緊急呼び出し用)の ID は変更できない。
+        // ほかのルームの ID は入力途中の値をそのまま受け付け、「all」との重複は保存時に確かめる。
+        if (room.locked && patch.id !== undefined) return { ...room, ...patch, id: room.id };
         return { ...room, ...patch };
       })
     );
@@ -83,15 +120,28 @@ export function AdminClient() {
 
   const removeRoom = (index: number) => {
     // 全体ルーム(緊急呼び出し用)は削除できない。
-    setRooms((prev) => prev.filter((room, i) => i !== index || room.id === BROADCAST_ROOM_ID));
+    setRooms((prev) => prev.filter((room, i) => i !== index || room.locked));
   };
 
   const addRoom = () => {
-    setRooms((prev) => [...prev, { id: `room${prev.length + 1}`, label: "", description: "" }]);
+    const rowKey = nextRowKeyRef.current;
+    nextRowKeyRef.current += 1;
+    setRooms((prev) => [
+      ...prev,
+      { id: `room${prev.length + 1}`, label: "", description: "", rowKey, locked: false },
+    ]);
   };
 
   const importCsv = () => {
-    const parsed = parseCsv(csvText);
+    const { staff: parsed, issues } = parseCsv(csvText);
+    setCsvIssues(issues);
+    if (issues.length > 0) {
+      setMessage(null);
+      setError(
+        `スタッフ名として使えない行が${issues.length}件あるため、読み込みませんでした。下の一覧を見てCSVを直し、もう一度「CSVを読み込む」を押してください。`
+      );
+      return;
+    }
     if (parsed.length === 0) {
       setError("CSVからスタッフを読み取れませんでした（1行に「名前,職種」）");
       return;
@@ -99,6 +149,15 @@ export function AdminClient() {
     setStaff(parsed);
     setError(null);
     setMessage(`${parsed.length}名を読み込みました（保存するには下の「保存する」を押してください）`);
+  };
+
+  const removeInvalidStaff = () => {
+    const removed = invalidStaff.length;
+    setStaff((prev) => prev.filter((member) => validateDisplayName(member.name) === null));
+    setError(null);
+    setMessage(
+      `使えない名前の${removed}名を一覧から外しました（保存するには下の「保存する」を押してください）`
+    );
   };
 
   const onFile = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -110,14 +169,27 @@ export function AdminClient() {
   };
 
   const save = useCallback(async () => {
-    setSaving(true);
     setError(null);
     setMessage(null);
+    if (rooms.some((room) => !room.locked && room.id.trim() === BROADCAST_ROOM_ID)) {
+      setError(`${BROADCAST_ID_TAKEN_MESSAGE}。別のIDにしてから保存してください。`);
+      return;
+    }
+    if (invalidStaff.length > 0) {
+      setError(
+        "スタッフ一覧に、スタッフ名として使えない名前があります。CSVを直して読み込み直すか、「使えない名前を一覧から外す」を押してから保存してください。"
+      );
+      return;
+    }
+    setSaving(true);
     try {
       const response = await fetch("/api/admin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rooms, staff }),
+        body: JSON.stringify({
+          rooms: rooms.map(({ id, label, description }) => ({ id, label, description })),
+          staff,
+        }),
       });
       const data = (await response.json()) as { ok?: boolean; error?: string };
       if (!response.ok || !data.ok) throw new Error(data.error ?? "保存に失敗しました");
@@ -127,7 +199,7 @@ export function AdminClient() {
     } finally {
       setSaving(false);
     }
-  }, [rooms, staff]);
+  }, [invalidStaff, rooms, staff]);
 
   if (loading) {
     return (
@@ -173,7 +245,7 @@ export function AdminClient() {
         </div>
 
         {rooms.map((room, index) => (
-          <div key={index} className="adminRow">
+          <div key={room.rowKey} className="adminRow">
             <label className="field">
               <span>ルーム名（表示名）</span>
               <input
@@ -196,15 +268,16 @@ export function AdminClient() {
                 value={room.id}
                 onChange={(event) => updateRoom(index, { id: event.target.value })}
                 placeholder="clinic"
-                readOnly={room.id === BROADCAST_ROOM_ID}
+                readOnly={room.locked}
                 title={
-                  room.id === BROADCAST_ROOM_ID
-                    ? "緊急呼び出しに使う全体ルームのため、IDは変更できません"
-                    : undefined
+                  room.locked ? "緊急呼び出しに使う全体ルームのため、IDは変更できません" : undefined
                 }
               />
+              {!room.locked && room.id.trim() === BROADCAST_ROOM_ID ? (
+                <small className="fieldError">{BROADCAST_ID_TAKEN_MESSAGE}</small>
+              ) : null}
             </label>
-            {room.id === BROADCAST_ROOM_ID ? (
+            {room.locked ? (
               <span className="adminLockedTag" title="緊急呼び出しに使う全体ルームのため削除できません">
                 削除不可（緊急用）
               </span>
@@ -234,6 +307,9 @@ export function AdminClient() {
           1行に「名前,職種」の形式で貼り付けるか、CSVファイルを選んでください。例:
           <br />
           <code>佐藤,歯科医師</code> / <code>田中,歯科衛生士</code>
+          <br />
+          ※ 名前は32文字以内で、使えるのは文字・数字・スペース・「・」「_」「-」「.」です（カッコや「/」は使えません。例:
+          「田中（DH）」ではなく「田中 DH」）。
         </p>
 
         <input type="file" accept=".csv,text/csv,text/plain" onChange={onFile} className="adminFile" />
@@ -248,6 +324,37 @@ export function AdminClient() {
         <button className="secondary" onClick={importCsv}>
           CSVを読み込む
         </button>
+
+        {csvIssues.length > 0 ? (
+          <div className="error">
+            <p>次の行はスタッフ名として使えないため、読み込みませんでした。</p>
+            <ul>
+              {csvIssues.slice(0, 20).map((issue) => (
+                <li key={issue.line}>
+                  {issue.line}行目「{issue.name}」: {issue.reason}
+                </li>
+              ))}
+              {csvIssues.length > 20 ? <li>…ほか {csvIssues.length - 20} 件</li> : null}
+            </ul>
+          </div>
+        ) : null}
+
+        {invalidStaff.length > 0 ? (
+          <div className="warning" role="status">
+            <p>
+              登録済みのスタッフのうち{invalidStaff.length}名は、名前に使えない文字が含まれているか長すぎるため、インカム画面の候補に表示されません（
+              {invalidStaff
+                .slice(0, 5)
+                .map((item) => `「${item.name}」`)
+                .join("")}
+              {invalidStaff.length > 5 ? "ほか" : ""}
+              ）。CSVを直して読み込み直すか、一覧から外してください。
+            </p>
+            <button className="inlineButton" onClick={removeInvalidStaff}>
+              使えない名前を一覧から外す
+            </button>
+          </div>
+        ) : null}
 
         {staff.length > 0 ? (
           <ul className="participants adminStaffList">

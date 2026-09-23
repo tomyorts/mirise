@@ -47,6 +47,8 @@ type ConnectOptions = {
 const AUTO_OFF_MS = 30_000;
 // 緊急呼び出しを押したとき、自動でマイクをONにしておく時間。
 const EMERGENCY_TALK_MS = 8_000;
+// 「押して話す」を押し続けたときの送信の上限(離したことを検知できなかった場合の保険)。
+const HOLD_MAX_MS = 60_000;
 // 自動再接続の待ち時間(失敗するたびに次の値へ。最後の値を繰り返す)。
 const RECONNECT_DELAYS_MS = [2_000, 5_000, 15_000, 30_000, 60_000];
 
@@ -209,6 +211,11 @@ export function IntercomClient() {
   const micOnRef = useRef(false);
   // 「押して話す」ボタン/スペースキーを押している間 true。
   const holdActiveRef = useRef(false);
+  // 押して話す の操作元(ボタン=pointer / スペースキー=key)と、ボタンを押している指・マウスのID。
+  const holdSourceRef = useRef<"pointer" | "key" | null>(null);
+  const holdPointerIdRef = useRef<number | null>(null);
+  // 押し続けの上限タイマー。
+  const holdLimitTimerRef = useRef<number | null>(null);
   const autoOffTimerRef = useRef<number | null>(null);
   const connectingRef = useRef(false);
   // マイク準備中の部屋(同じ部屋で二重に準備しないため)。
@@ -473,6 +480,17 @@ export function IntercomClient() {
     return () => window.clearInterval(timer);
   }, [autoOffAt]);
 
+  // 「押して話す」の状態を解除する(マイク自体は呼び出し側で止める)。
+  const endHoldState = useCallback(() => {
+    holdActiveRef.current = false;
+    holdSourceRef.current = null;
+    holdPointerIdRef.current = null;
+    if (holdLimitTimerRef.current !== null) {
+      window.clearTimeout(holdLimitTimerRef.current);
+      holdLimitTimerRef.current = null;
+    }
+  }, []);
+
   // 部屋との接続だけを片付ける。AudioContext は closeAudio のときだけ閉じる
   // (自動再接続ではユーザー操作なしで作り直せないため、開いたまま使い回す)。
   const teardownRoom = useCallback(
@@ -482,7 +500,7 @@ export function IntercomClient() {
 
       roomRef.current = null;
       localTrackRef.current = null;
-      holdActiveRef.current = false;
+      endHoldState();
       micOnRef.current = false;
       clearAutoOff();
 
@@ -524,7 +542,7 @@ export function IntercomClient() {
         gainRef.current = null;
       }
     },
-    [clearAutoOff]
+    [clearAutoOff, endHoldState]
   );
 
   const clearReconnectTimer = useCallback(() => {
@@ -618,12 +636,18 @@ export function IntercomClient() {
         return false;
       }
 
+      // 接続直後は必ずマイクOFF(送信しない)。公開する前にミュートしておき、
+      // ほかの端末へ一瞬でもマイクONの状態で届かないようにする。
+      await track.mute();
+      if (roomRef.current !== room) {
+        track.stop();
+        return false;
+      }
+
       await room.localParticipant.publishTrack(track, {
         source: Track.Source.Microphone,
       });
       published = true;
-      // 接続直後は必ずマイクOFF(送信しない)。
-      await track.mute();
 
       if (roomRef.current !== room) {
         track.stop();
@@ -913,36 +937,52 @@ export function IntercomClient() {
     }
   }, []);
 
-  // 押している間だけ送信(大きなボタン/スペースキー)。
-  const startHold = useCallback(() => {
-    if (!localTrackRef.current || holdActiveRef.current) return;
-    holdActiveRef.current = true;
-    clearAutoOff();
-    void setMicrophone(true);
-  }, [clearAutoOff, setMicrophone]);
-
-  const stopHold = useCallback(() => {
-    if (!holdActiveRef.current) return;
-    holdActiveRef.current = false;
-    void setMicrophone(false);
-  }, [setMicrophone]);
-
   // どの方法で送信していても止める(画面を離れたとき等)。
   const stopAllTransmit = useCallback(
     (message?: string) => {
       const wasTransmitting = micOnRef.current || holdActiveRef.current;
-      holdActiveRef.current = false;
+      endHoldState();
       clearAutoOff();
       if (micOnRef.current) void setMicrophone(false);
       if (wasTransmitting && message) setNotice(message);
     },
-    [clearAutoOff, setMicrophone]
+    [clearAutoOff, endHoldState, setMicrophone]
   );
+
+  // 押している間だけ送信(大きなボタン/スペースキー)。
+  // 離したことを検知できなかった場合に備えて、押し続けても HOLD_MAX_MS で止める。
+  const startHold = useCallback(
+    (source: "pointer" | "key", pointerId?: number) => {
+      if (!localTrackRef.current || holdActiveRef.current) return;
+      // 再接続中などは送信を始めない。
+      if (roomRef.current?.state !== ConnectionState.Connected) return;
+      holdActiveRef.current = true;
+      holdSourceRef.current = source;
+      holdPointerIdRef.current = pointerId ?? null;
+      clearAutoOff();
+      if (holdLimitTimerRef.current !== null) window.clearTimeout(holdLimitTimerRef.current);
+      holdLimitTimerRef.current = window.setTimeout(() => {
+        holdLimitTimerRef.current = null;
+        if (!holdActiveRef.current) return;
+        stopAllTransmit(
+          `${HOLD_MAX_MS / 1000}秒以上押し続けているため、送信を停止しました。話す場合は、いったん離してからもう一度押してください。`
+        );
+      }, HOLD_MAX_MS);
+      void setMicrophone(true);
+    },
+    [clearAutoOff, setMicrophone, stopAllTransmit]
+  );
+
+  const stopHold = useCallback(() => {
+    if (!holdActiveRef.current) return;
+    endHoldState();
+    void setMicrophone(false);
+  }, [endHoldState, setMicrophone]);
 
   // タップで送信開始/停止。送信は30秒で自動停止する。
   const toggleTransmit = useCallback(() => {
     if (!localTrackRef.current) return;
-    holdActiveRef.current = false;
+    endHoldState();
     if (micOnRef.current) {
       void setMicrophone(false);
       return;
@@ -950,7 +990,7 @@ export function IntercomClient() {
     setNotice(null);
     void setMicrophone(true);
     armAutoOff(AUTO_OFF_MS, "30秒たったため、送信を自動で停止しました。");
-  }, [armAutoOff, setMicrophone]);
+  }, [armAutoOff, endHoldState, setMicrophone]);
 
   const switchRoom = useCallback(
     async (targetRoomId: string) => {
@@ -983,8 +1023,12 @@ export function IntercomClient() {
     });
 
     const hasMic = !!localTrackRef.current;
-    if (hasMic) {
-      holdActiveRef.current = false;
+    // 接続を待っている間に別のウィンドウ・タブへ移っていたら、マイクはONにしない
+    // (見ていない画面で送信が始まり、赤い表示にも気づけないため)。
+    const screenActive = document.visibilityState === "visible" && document.hasFocus();
+    const autoTalk = hasMic && screenActive;
+    if (autoTalk) {
+      endHoldState();
       void setMicrophone(true);
       armAutoOff(EMERGENCY_TALK_MS, "緊急呼び出しの送信を終了しました（マイクOFF）。");
     }
@@ -992,18 +1036,22 @@ export function IntercomClient() {
     if (sent) {
       setError(null);
       setNotice(
-        hasMic
+        autoTalk
           ? "全体ルームで緊急呼び出しを送りました。8秒間マイクがONになるので、そのまま話してください。届くのは全体ルームに接続中の端末だけです。このパソコンは全体ルームに入ったままです。"
-          : "全体ルームで緊急呼び出しを送りました（マイクが使えないため、声は送れません）。届くのは全体ルームに接続中の端末だけです。"
+          : hasMic
+            ? "全体ルームで緊急呼び出しを送りました。画面が切り替わったため、マイクはONにしていません。声で呼びかける場合は、この画面で「押して話す」を使ってください。届くのは全体ルームに接続中の端末だけです。"
+            : "全体ルームで緊急呼び出しを送りました（マイクが使えないため、声は送れません）。届くのは全体ルームに接続中の端末だけです。"
       );
     } else {
       setError(
-        hasMic
+        autoTalk
           ? "緊急の通知を送れませんでした。全体ルームでマイクが8秒間ONになっているので、声で呼びかけてください。"
-          : "緊急の通知を送れませんでした。通信状況を確認して、もう一度押してください。"
+          : hasMic
+            ? "緊急の通知を送れませんでした。画面が切り替わったため、マイクもONにしていません。この画面で、もう一度押してください。"
+            : "緊急の通知を送れませんでした。通信状況を確認して、もう一度押してください。"
       );
     }
-  }, [armAutoOff, connect, sendSignal, setMicrophone]);
+  }, [armAutoOff, connect, endHoldState, sendSignal, setMicrophone]);
 
   // キーボード: スペースキーを押している間だけ送信。ほかのキー(Enter・矢印・ページ送り・
   // メディアキー等)では送信しない。キーのリピートは無視する。
@@ -1015,7 +1063,7 @@ export function IntercomClient() {
       // ページのスクロールや、選択中のボタンが押されてしまうのを防ぐ。
       event.preventDefault();
       if (event.repeat) return;
-      startHold();
+      startHold("key");
     };
 
     const onKeyUp = (event: KeyboardEvent) => {
@@ -1036,6 +1084,36 @@ export function IntercomClient() {
       window.removeEventListener("keyup", onKeyUp);
     };
   }, [startHold, stopHold]);
+
+  // 「押して話す」ボタンを離したことを、ボタンの外(ページのどこか)でも拾う保険。
+  // ボタンが途中で押せない状態になると、ボタン自体には離した操作が届かないブラウザがあるため。
+  useEffect(() => {
+    const onPointerEnd = (event: PointerEvent) => {
+      if (!holdActiveRef.current || holdSourceRef.current !== "pointer") return;
+      const pointerId = holdPointerIdRef.current;
+      if (pointerId !== null && event.pointerId !== pointerId) return;
+      stopHold();
+    };
+    window.addEventListener("pointerup", onPointerEnd);
+    window.addEventListener("pointercancel", onPointerEnd);
+    return () => {
+      window.removeEventListener("pointerup", onPointerEnd);
+      window.removeEventListener("pointercancel", onPointerEnd);
+    };
+  }, [stopHold]);
+
+  // 通信が不安定になって再接続が始まったら、送信を止める
+  // (再接続中は送信ボタンが押せず、止められなくなるため)。
+  useEffect(() => {
+    if (
+      connectionState === ConnectionState.Reconnecting ||
+      connectionState === ConnectionState.SignalReconnecting
+    ) {
+      stopAllTransmit(
+        "通信が不安定になったため、送信を停止しました。つながったら、もう一度押して話してください。"
+      );
+    }
+  }, [connectionState, stopAllTransmit]);
 
   // 送信の止め忘れ防止: 別のウィンドウに移った・画面が隠れた・ページを離れたときは送信を止める。
   // 自動再接続: 通信が戻ったとき・画面が再表示されたときにすぐ試す。
@@ -1091,6 +1169,14 @@ export function IntercomClient() {
   }, [cancelAutoReconnect, teardownRoom]);
 
   const displayNameError = displayName.trim() ? validateDisplayName(displayName) : null;
+  // 候補には、スタッフ名の規則に合う名前だけを出す(合わない名前は選んでも接続できないため)。
+  const staffNameOptions = useMemo(
+    () =>
+      Array.from(new Set(staffNames.map((name) => name.trim()))).filter(
+        (name) => validateDisplayName(name) === null
+      ),
+    [staffNames]
+  );
   const autoOffRemaining =
     autoOffAt !== null ? Math.max(0, Math.ceil((autoOffAt - now) / 1000)) : null;
   const isTransmitting = isMicOn && connectionState !== ConnectionState.Disconnected;
@@ -1177,12 +1263,12 @@ export function IntercomClient() {
             onChange={(event) => setDisplayName(event.target.value)}
             placeholder="例: 受付 佐藤"
             disabled={isBusy || inSession}
-            list={staffNames.length > 0 ? "staffNameList" : undefined}
+            list={staffNameOptions.length > 0 ? "staffNameList" : undefined}
             autoComplete="off"
           />
-          {staffNames.length > 0 ? (
+          {staffNameOptions.length > 0 ? (
             <datalist id="staffNameList">
-              {staffNames.map((name) => (
+              {staffNameOptions.map((name) => (
                 <option key={name} value={name} />
               ))}
             </datalist>
@@ -1267,11 +1353,18 @@ export function IntercomClient() {
           onPointerDown={(event) => {
             if (event.pointerType === "mouse" && event.button !== 0) return;
             event.preventDefault();
-            startHold();
+            // 指・マウスがボタンの外へずれても、離した操作がこのボタンに届くようにする。
+            try {
+              event.currentTarget.setPointerCapture(event.pointerId);
+            } catch {
+              // 捕捉できない環境では、下の pointerleave と画面全体での検知で止める
+            }
+            startHold("pointer", event.pointerId);
           }}
           onPointerUp={() => stopHold()}
           onPointerLeave={() => stopHold()}
           onPointerCancel={() => stopHold()}
+          onLostPointerCapture={() => stopHold()}
           onContextMenu={(event) => event.preventDefault()}
           disabled={!isConnected || !canTalk}
         >
@@ -1292,7 +1385,7 @@ export function IntercomClient() {
 
         <p className="hint">
           話し方は2通りです。
-          <br />・<strong>押して話す</strong>：大きなボタン（またはキーボードのスペースキー）を押している間だけ送信します。
+          <br />・<strong>押して話す</strong>：大きなボタン（またはキーボードのスペースキー）を押している間だけ送信します（押し続けても{HOLD_MAX_MS / 1000}秒で停止）。
           <br />・<strong>タップで送信</strong>：1回押すと送信開始、もう1回押すと停止します。止め忘れても30秒で自動停止します。
           <br />
           送信中は画面上部に<strong>赤く表示</strong>されます。別の画面に切り替えると送信は止まります。患者さんのお名前などは話さず、チェア番号などで伝えてください。
