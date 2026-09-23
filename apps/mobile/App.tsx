@@ -170,6 +170,15 @@ function displayNameOf(p: { name?: string; identity: string }): string {
 
 const DISPLAY_NAME_MAX = 32;
 
+// 画面上部の状態表示の色。
+const STATUS_COLORS = {
+  idle: "#98a2b3",
+  ok: "#0f8f4f",
+  busy: "#d19a00",
+  warn: "#e06a00",
+  live: "#c62030",
+} as const;
+
 // エラーを診断ログ用の文字列にする。react-native-webrtc のエラーは Error の
 // インスタンスではないことがあり、String(e) だと "[object Object]" になって
 // 原因が分からなくなるため、name/message を取り出す。
@@ -396,6 +405,15 @@ export default function App() {
   const bleToggleInitiatedRef = useRef(false);
   // BLEボタンの状態詳細(登録フローの案内文などを画面に出す)。
   const [bleDetail, setBleDetail] = useState<string | null>(null);
+  // 画面の「押して話す」ボタンを押している間 true(表示用)。
+  const [holding, setHolding] = useState(false);
+  // 押した時にどちらの経路で送信を始めたか。離した時に同じ経路で止めるために覚えておく
+  // (押している間に参加状態が変わっても、開始と停止の経路が食い違わないようにする)。
+  const holdPathRef = useRef<"ptt" | "direct" | null>(null);
+  // 今話している他のスタッフの名前(サーバーの音声検出による)。
+  const [remoteSpeakers, setRemoteSpeakers] = useState<string[]>([]);
+  // 「詳細設定・診断」を開いているか。
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   // トグル判定を最新値で行うための参照 + 自動OFFタイマー。
   const micOnRef = useRef(false);
   const autoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -515,6 +533,7 @@ export default function App() {
     // (手動でも止めると二重制御になり、PTT起動時などに活性化が失敗する原因になる)。
     setConnected(false);
     setMicOn(false);
+    setRemoteSpeakers([]);
   }, [clearAutoOff]);
 
   const connect = useCallback((): Promise<boolean> => {
@@ -572,6 +591,7 @@ export default function App() {
           logDebug(`room: 切断(${reasonName})`);
           setConnected(false);
           setMicOn(false);
+          setRemoteSpeakers([]);
           // 自分で切った場合(退勤・再接続のための作り直し)は何も表示しない。
           if (reason === DisconnectReason.CLIENT_INITIATED) return;
           if (reason === DisconnectReason.DUPLICATE_IDENTITY) {
@@ -603,11 +623,18 @@ export default function App() {
         });
         // サーバーが実際に計測した「自分の声の音量」。これが記録されれば、
         // 音声が確実にサーバーまで届いている証拠になる(ローカルの状態だけでは分からない)。
+        // あわせて、今話している他のスタッフの名前を画面に出す。
         lkRoom.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-          const me = speakers.find((s) => s.sid === lkRoom.localParticipant.sid);
+          if (roomRef.current !== lkRoom) return;
+          const localSid = lkRoom.localParticipant.sid;
+          const me = speakers.find((s) => s.sid === localSid);
           if (me) {
             logDebug(`サーバー計測: 自分の音声を検出 level=${me.audioLevel.toFixed(3)}`);
           }
+          const others = speakers.filter((s) => s.sid !== localSid).map(displayNameOf);
+          setRemoteSpeakers((prev) =>
+            prev.length === others.length && prev.every((n, i) => n === others[i]) ? prev : others,
+          );
         });
 
         await lkRoom.connect(data.url, data.token);
@@ -1076,15 +1103,46 @@ export default function App() {
     screenHoldRef.current = true;
     PttChannel?.beginTransmitting().catch((e) => {
       screenHoldRef.current = false;
-      logDebug(`PTT: 開始失敗 ${e instanceof Error ? e.message : String(e)}`);
+      logDebug(`PTT: 開始失敗 ${errMsg(e)}`);
+      if (!nativePttJoined()) {
+        // ネイティブ側でチャンネルから外れていた。表示を実態に合わせ、
+        // 「ロック中でも話せるようにする」ボタンを出す(次の押下は画面から直接送る)。
+        setPttJoined(false);
+        setError("ロック中に話す機能が外れていました。「ロック中でも話せるようにする」を押してください");
+      } else {
+        setError("送信を開始できませんでした。もう一度押してください");
+      }
     });
-  }, [logDebug]);
+  }, [logDebug, setError]);
   const pttPressOut = useCallback(() => {
     screenHoldRef.current = false;
     PttChannel?.endTransmitting().catch((e) => {
       logDebug(`PTT: 停止失敗 ${e instanceof Error ? e.message : String(e)}`);
     });
   }, [logDebug]);
+
+  // 画面の「押して話す」ボタン(押している間だけ送信)。
+  // ロック中に話す機能(PushToTalk)に参加中はその経路で送る。システムの送信表示と
+  // 状態が揃い、イヤホンのボタンでの送信と取り合いにならない。
+  // 未参加(iOS16未満など)なら、接続中のマイクを直接ON/OFFする。
+  const talkPressIn = useCallback(() => {
+    setHolding(true);
+    setError(null);
+    if (pttJoinedRef.current && PttChannel) {
+      holdPathRef.current = "ptt";
+      pttPressIn();
+    } else {
+      holdPathRef.current = "direct";
+      void setMic(true);
+    }
+  }, [pttPressIn, setMic, setError]);
+  const talkPressOut = useCallback(() => {
+    setHolding(false);
+    const path = holdPathRef.current;
+    holdPathRef.current = null;
+    if (path === "ptt") pttPressOut();
+    else if (path === "direct") void setMic(false);
+  }, [pttPressOut, setMic]);
 
   // BLEボタン(iTag型)押下: 送信ON/OFFのトグル。
   // PTT参加中はPTKit経由(ロック中でも動く)。未参加で通常接続中なら従来のトグル。
@@ -1236,51 +1294,104 @@ export default function App() {
     };
   }, [cleanup]);
 
+  const onShift = connected || pttJoined;
+  const roomLabel = ROOMS.find((r) => r.id === roomId)?.label ?? roomId;
+  // 画面上部に出す現在の状態。
+  const statusView: { tone: "idle" | "ok" | "busy" | "warn" | "live"; text: string } = micOn
+    ? { tone: "live", text: "送信中 — あなたの声が流れています" }
+    : connected
+      ? {
+          tone: "ok",
+          text: pttJoined ? "待機中 — イヤホンのボタンで話せます" : "待機中 — 画面のボタンで話せます",
+        }
+      : connecting
+        ? { tone: "busy", text: "接続中…" }
+        : pttJoined
+          ? { tone: "warn", text: "通信が途切れています — 話すと自動で再接続します" }
+          : { tone: "idle", text: "勤務外（未接続）" };
+  const talkLabel = holding
+    ? micOn
+      ? "話しています…（離すと終了）"
+      : "準備中…"
+    : micOn
+      ? "送信中 — 押して離すと停止"
+      : "押して話す";
+
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="dark" />
-      <ScrollView contentContainerStyle={styles.container}>
+      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
         <Text style={styles.brand}>MIRISE WELLMEDICAL GROUP</Text>
         <Text style={styles.title}>院内音声インカム</Text>
 
         {micOn ? (
           <View style={styles.liveBanner}>
-            <Text style={styles.liveText}>🔴 送信中（マイクON）— 終わったら離す/停止</Text>
+            <Text style={styles.liveText}>🔴 送信中（マイクON）</Text>
+          </View>
+        ) : null}
+
+        {error ? (
+          <View style={styles.errorBox}>
+            <Text style={styles.errorText}>{error.message}</Text>
+            {error.action === "settings" ? (
+              <Pressable
+                style={styles.errorAction}
+                onPress={() => {
+                  void Linking.openSettings();
+                }}
+              >
+                <Text style={styles.errorActionText}>設定を開く</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
 
         <View style={styles.card}>
-          <Text style={styles.cardLabel}>スタッフ名</Text>
-          <TextInput
-            style={styles.input}
-            value={identity}
-            onChangeText={setIdentity}
-            placeholder="例: 佐藤 / DH田中"
-            editable={!connected && !connecting && !pttJoined}
-            autoCapitalize="none"
-            autoCorrect={false}
-            maxLength={DISPLAY_NAME_MAX}
-          />
-
-          <Text style={[styles.cardLabel, { marginTop: 16 }]}>参加ルーム</Text>
-          <View style={styles.roomRow}>
-            {ROOMS.map((room) => {
-              const selected = room.id === roomId;
-              return (
-                <Pressable
-                  key={room.id}
-                  onPress={() => !connected && !pttJoined && setRoomId(room.id)}
-                  style={[styles.roomChip, selected && styles.roomChipOn]}
-                >
-                  <Text style={[styles.roomChipText, selected && styles.roomChipTextOn]}>
-                    {room.label}
-                  </Text>
-                </Pressable>
-              );
-            })}
+          <View style={styles.statusRow}>
+            <View style={[styles.statusDot, { backgroundColor: STATUS_COLORS[statusView.tone] }]} />
+            <Text style={styles.statusText}>{statusView.text}</Text>
           </View>
 
-          {connected || pttJoined ? (
+          {onShift ? (
+            <Text style={styles.shiftSummary}>
+              {identity.trim()} ・ {roomLabel}
+            </Text>
+          ) : (
+            <>
+              <Text style={[styles.cardLabel, { marginTop: 14 }]}>スタッフ名</Text>
+              <TextInput
+                style={styles.input}
+                value={identity}
+                onChangeText={setIdentity}
+                placeholder="例: 佐藤 / DH田中"
+                editable={!connecting}
+                autoCapitalize="none"
+                autoCorrect={false}
+                maxLength={DISPLAY_NAME_MAX}
+                returnKeyType="done"
+              />
+
+              <Text style={[styles.cardLabel, { marginTop: 16 }]}>参加ルーム</Text>
+              <View style={styles.roomRow}>
+                {ROOMS.map((room) => {
+                  const selected = room.id === roomId;
+                  return (
+                    <Pressable
+                      key={room.id}
+                      onPress={() => !connecting && setRoomId(room.id)}
+                      style={[styles.roomChip, selected && styles.roomChipOn]}
+                    >
+                      <Text style={[styles.roomChipText, selected && styles.roomChipTextOn]}>
+                        {room.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </>
+          )}
+
+          {onShift ? (
             <>
               {!connected ? (
                 <Pressable
@@ -1314,26 +1425,36 @@ export default function App() {
           )}
         </View>
 
-        {connected ? (
+        {onShift ? (
           <View style={styles.card}>
-            <Text style={styles.status}>接続中</Text>
+            {remoteSpeakers.length > 0 ? (
+              <Text style={styles.speakingNow}>🗣 {remoteSpeakers.join("、")} が話しています</Text>
+            ) : null}
 
             <Pressable
-              style={[styles.ptt, micOn && styles.pttOn]}
-              onPressIn={() => void setMic(true)}
-              onPressOut={() => void setMic(false)}
+              style={[styles.ptt, (micOn || holding) && styles.pttOn]}
+              onPressIn={talkPressIn}
+              onPressOut={talkPressOut}
             >
-              <Text style={styles.pttText}>押して話す</Text>
+              <Text style={styles.pttText}>{talkLabel}</Text>
             </Pressable>
 
-            <Pressable
-              style={[styles.toggle, micOn && styles.toggleOn]}
-              onPress={toggleMic}
-            >
-              <Text style={[styles.toggleText, micOn && styles.toggleTextOn]}>
-                {micOn ? "■ 送信中 — タップで停止" : "● タップで送信開始 / 停止"}
-              </Text>
-            </Pressable>
+            {connected && !pttJoined && PttChannel ? (
+              <View style={styles.warnBox}>
+                <Text style={styles.warnText}>
+                  ⚠️ 今はロック中・ポケットの中から話せません。
+                </Text>
+                <Pressable
+                  style={[styles.secondary, { marginTop: 8 }, pttBusy && styles.disabled]}
+                  onPress={() => void joinPtt()}
+                  disabled={pttBusy}
+                >
+                  <Text style={styles.secondaryText}>
+                    {pttBusy ? "準備中..." : "ロック中でも話せるようにする"}
+                  </Text>
+                </Pressable>
+              </View>
+            ) : null}
 
             <Pressable style={styles.toggle} onPress={toggleSpeaker}>
               <Text style={styles.toggleText}>
@@ -1343,64 +1464,62 @@ export default function App() {
               </Text>
             </Pressable>
 
+            <Text style={styles.guideTitle}>🎧 ポケットに入れたまま話す</Text>
             <Text style={styles.hint}>
-              「押して話す」を押している間だけ声が流れます。常時ONにはなりません。
-              🎧 Bluetoothイヤホンを接続していれば、受信音は自動でイヤホンに流れます
-              （周囲や患者には聞こえません）。イヤホンが無いときはスピーカーで鳴るので、
-              ポケットに入れたままでも聞こえます。静かにしたい時は上のボタンで切り替えてください。
-              切り忘れ防止のため、送信は約30秒で自動停止します。
-              診療中は患者情報を言わず、チェア番号やセット名で運用してください。
+              ・Bluetoothイヤホンのボタンを1回押すと送信開始、もう1回押すと終了。
+              {"\n"}・押し忘れても45秒で自動的に止まります。
+              {"\n"}・一般的なBluetoothイヤホンで使えます（AirPodsは不可・iOS 17以降）。
+              {"\n"}・機種によっては、押した時に音楽アプリも反応することがあります。
+              {"\n"}・イヤホンが無い時は、画面上部やロック画面の「MIRISE Intercom」表示を開き、トークボタンを押している間だけ話せます。
+              {"\n"}・受信音はイヤホン接続中はイヤホンから流れます（周囲には聞こえません）。
+              {"\n"}・うまく送れない時は「退勤する」→「出勤する」で直ります。
+            </Text>
+            <Text style={[styles.hint, { marginTop: 6 }]}>
+              診療中は患者さんの個人情報を言わず、チェア番号やセット名で伝えてください。
             </Text>
           </View>
         ) : null}
 
-        {connected ? (
+        <Pressable style={styles.advancedHeader} onPress={() => setAdvancedOpen((v) => !v)}>
+          <Text style={styles.advancedHeaderText}>
+            {advancedOpen ? "▼" : "▶"} 詳細設定・診断
+          </Text>
+        </Pressable>
+
+        {advancedOpen ? (
           <View style={styles.card}>
-            <Text style={styles.cardLabel}>📱 ポケット送信（実験・Phase B）</Text>
-            <Text style={[styles.hint, { color: PttChannel ? "#0f8f4f" : "#c62030" }]}>
-              PTTネイティブ: {PttChannel ? "有効（読み込み済み）" : "無効（未読み込み）"}
-              {"\n"}RemotePtt: {RemotePtt ? "有効" : "無効"} / ビルドタグ:{" "}
-              {RemotePtt?.buildTag ?? "（旧ビルド）"} / iOS {String(Platform.Version)}（診断用）
-            </Text>
+            <Text style={styles.cardLabel}>端末の状態</Text>
             <Text style={styles.hint}>
-              使い方:「PTTを有効化」を1回押しておけば準備完了です。
-              {"\n"}※ボタンが効かなくなったら、一度「PTTを無効化（退出）」→「PTTを有効化」で復帰します。
-              {"\n"}🎧 いちばん確実な使い方: Bluetoothイヤホンを接続し、
-              【イヤホンのボタンを押して話す】。スマホはポケットに入れたままでOK、
-              取り出す必要も画面を触る必要もありません（iOS17以降）。
-              {"\n"}🔒 イヤホンが無いときは、画面上部の【青いPTT表示（Dynamic Island）】をタップ →
-              システムの「トーク」ボタンを長押し。
-              {"\n"}切断されていても自動で再接続します（繋がるまで1〜3秒かかるので、
-              押してひと呼吸おいてから話し始めてください）。
+              ロック中に話す機能: {PttChannel ? "対応" : "未対応（iOS16以上が必要）"}
+              {PttChannel ? `（${pttJoined ? "準備済み" : "未準備"}）` : ""}
+              {"\n"}ビルド: {RemotePtt?.buildTag ?? "旧ビルド"} / iOS {String(Platform.Version)}
+              {"\n"}端末ID: {getDeviceTag()}
             </Text>
 
-            {!pttJoined ? (
-              <Pressable
-                style={[styles.primary, pttBusy && styles.disabled]}
-                onPress={() => void joinPtt()}
-                disabled={pttBusy}
-              >
-                <Text style={styles.primaryText}>
-                  {pttBusy ? "準備中..." : "PTTを有効化（参加）"}
-                </Text>
-              </Pressable>
-            ) : (
-              <>
+            {PttChannel && connected ? (
+              pttJoined ? (
                 <Pressable
-                  style={[styles.ptt, micOn && styles.pttOn]}
-                  onPressIn={pttPressIn}
-                  onPressOut={pttPressOut}
+                  style={[styles.secondary, pttBusy && styles.disabled]}
+                  onPress={() => void leavePtt()}
+                  disabled={pttBusy}
                 >
-                  <Text style={styles.pttText}>話す（PTT）</Text>
+                  <Text style={styles.secondaryText}>ロック中に話す機能を解除する</Text>
                 </Pressable>
-                <Pressable style={styles.secondary} onPress={() => void leavePtt()}>
-                  <Text style={styles.secondaryText}>PTTを無効化（退出）</Text>
+              ) : (
+                <Pressable
+                  style={[styles.secondary, pttBusy && styles.disabled]}
+                  onPress={() => void joinPtt()}
+                  disabled={pttBusy}
+                >
+                  <Text style={styles.secondaryText}>
+                    {pttBusy ? "準備中..." : "ロック中に話す機能を準備する"}
+                  </Text>
                 </Pressable>
-              </>
-            )}
+              )
+            ) : null}
 
-            <Text style={[styles.cardLabel, { marginTop: 16 }]}>
-              🔘 BLEボタン（iTag型・ロック中もOK）
+            <Text style={[styles.cardLabel, { marginTop: 18 }]}>
+              🔘 BLEボタン（iTag型・任意）
             </Text>
             <Text
               style={[
@@ -1415,14 +1534,14 @@ export default function App() {
                 : "このビルドは未対応（再ビルドが必要）"}
             </Text>
             <Text style={styles.hint}>
-              iTag型（紛失防止タグ）のボタンを登録すると、押すたびに送信ON/OFFできます。
-              🔒 画面ロック中・ポケットの中でも動作します（切り忘れ防止のため約30秒で自動停止）。
-              ※シャッターリモコン等のキーボード型はロック中は使えません（iOSの仕様）。
-              ※登録は1台ずつ・他のタグは離して行ってください。
+              iTag型（紛失防止タグ）のボタンを登録すると、押すたびに送信の開始/停止ができます。
+              画面ロック中・ポケットの中でも動作します（切り忘れ防止のため約30秒で自動停止）。
+              {"\n"}※シャッターリモコン等のキーボード型はロック中は使えません（iOSの仕様）。
+              {"\n"}※登録は1台ずつ、他のタグは離して行ってください。
             </Text>
             {bleStatus.registered && !pttJoined ? (
               <Text style={[styles.hint, { color: "#b76e00" }]}>
-                ⚠️ ロック中にBLEボタンを使うには、上の「PTTを有効化」も押してください。
+                ⚠️ ロック中にBLEボタンを使うには「出勤する」でロック中に話す機能も準備してください。
               </Text>
             ) : null}
             {bleBusy && bleDetail ? (
@@ -1446,36 +1565,22 @@ export default function App() {
               </Pressable>
             )}
 
-            <Text style={[styles.cardLabel, { marginTop: 16 }]}>
-              🪵 診断ログ（ロック中の動作確認用・新しい順）
+            <Text style={[styles.cardLabel, { marginTop: 18 }]}>
+              🪵 診断ログ（新しい順・不具合の報告時にスクリーンショットを送ってください）
             </Text>
             <View style={styles.debugLogBox}>
-              {debugLog.length === 0 ? (
-                <Text style={styles.debugLogLine}>（まだログがありません）</Text>
-              ) : (
-                [...debugLog].reverse().map((line, i) => (
-                  <Text key={i} style={styles.debugLogLine}>
-                    {line}
-                  </Text>
-                ))
-              )}
+              <ScrollView nestedScrollEnabled>
+                {debugLog.length === 0 ? (
+                  <Text style={styles.debugLogLine}>（まだログがありません）</Text>
+                ) : (
+                  [...debugLog].reverse().map((line, i) => (
+                    <Text key={i} style={styles.debugLogLine}>
+                      {line}
+                    </Text>
+                  ))
+                )}
+              </ScrollView>
             </View>
-          </View>
-        ) : null}
-
-        {error ? (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>{error.message}</Text>
-            {error.action === "settings" ? (
-              <Pressable
-                style={styles.errorAction}
-                onPress={() => {
-                  void Linking.openSettings();
-                }}
-              >
-                <Text style={styles.errorActionText}>設定を開く</Text>
-              </Pressable>
-            ) : null}
           </View>
         ) : null}
       </ScrollView>
@@ -1566,7 +1671,29 @@ const styles = StyleSheet.create({
     marginTop: 18,
   },
   secondaryText: { color: "#1f2f58", fontSize: 17, fontWeight: "700" },
-  status: { color: "#0f6d3b", fontWeight: "700", marginBottom: 14 },
+  statusRow: { flexDirection: "row", alignItems: "center" },
+  statusDot: { width: 12, height: 12, borderRadius: 6, marginRight: 10 },
+  statusText: { flex: 1, color: "#172033", fontSize: 16, fontWeight: "700" },
+  shiftSummary: { marginTop: 10, color: "#475467", fontSize: 15, fontWeight: "600" },
+  speakingNow: {
+    color: "#0f4bd8",
+    fontSize: 16,
+    fontWeight: "700",
+    marginBottom: 12,
+    textAlign: "center",
+  },
+  warnBox: {
+    marginTop: 12,
+    backgroundColor: "#fff7e6",
+    borderColor: "#f5d38a",
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+  },
+  warnText: { color: "#8a5200", fontWeight: "600", lineHeight: 20 },
+  guideTitle: { marginTop: 18, color: "#1f2f58", fontSize: 15, fontWeight: "700" },
+  advancedHeader: { paddingVertical: 12, paddingHorizontal: 4, marginBottom: 8 },
+  advancedHeaderText: { color: "#475467", fontSize: 15, fontWeight: "600" },
   ptt: {
     backgroundColor: "#263b69",
     borderRadius: 28,
@@ -1575,7 +1702,13 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   pttOn: { backgroundColor: "#0f8f4f" },
-  pttText: { color: "#ffffff", fontSize: 34, fontWeight: "800" },
+  pttText: {
+    color: "#ffffff",
+    fontSize: 28,
+    fontWeight: "800",
+    textAlign: "center",
+    paddingHorizontal: 16,
+  },
   toggle: {
     marginTop: 12,
     borderRadius: 16,
@@ -1585,9 +1718,7 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: "#c7d0e4",
   },
-  toggleOn: { backgroundColor: "#c62030", borderColor: "#a20d1a" },
   toggleText: { color: "#1f2f58", fontSize: 17, fontWeight: "700" },
-  toggleTextOn: { color: "#ffffff" },
   hint: { marginTop: 14, color: "#667085", lineHeight: 20, fontSize: 13 },
   errorBox: {
     backgroundColor: "#fff0f0",
@@ -1595,6 +1726,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 16,
     padding: 14,
+    marginBottom: 16,
   },
   errorText: { color: "#a20d1a", lineHeight: 20 },
   errorAction: {
