@@ -14,6 +14,11 @@ public class PttChannelModule: Module {
   fileprivate var delegateBox: Any?     // PttDelegate (iOS16+)
   fileprivate var channelUUID: UUID?
   fileprivate var channelName: String = "MIRISE Intercom"
+  // 送信中か・音声セッションが有効か。JSがイベントを購読する前に起きたことを、
+  // 購読後に getState で引き継げるように保持する(下の getState のコメント参照)。
+  fileprivate var isTransmitting = false
+  fileprivate var transmitSource: String?
+  fileprivate var isAudioActive = false
 
   public func definition() -> ModuleDefinition {
     Name("PttChannel")
@@ -39,14 +44,24 @@ public class PttChannelModule: Module {
       }
     }
 
-    // ネイティブ側の「本当の参加状態」を返す。JS側のstateはアプリ再起動
+    // ネイティブ側の「本当の状態」を返す。JS側のstateはアプリ再起動
     // (メモリ回収→バックグラウンド復元)でfalseに戻るが、ネイティブの
     // PTChannelManagerは復元されて参加済みのことがある。BLEボタン押下時は
     // こちらを真実として参照する。
+    // transmitting/audioActive: iOSが終了させていたアプリをイヤホンのボタンで
+    // 起こした場合、送信開始の通知はJSが購読する前に届いて捨てられる
+    // (システム上は送信中なのに無音になる)。JSは購読直後にこれを見て引き継ぐ。
     Function("getState") { () -> [String: Any] in
-      var result: [String: Any] = ["joined": self.channelUUID != nil]
+      var result: [String: Any] = [
+        "joined": self.channelUUID != nil,
+        "transmitting": self.isTransmitting,
+        "audioActive": self.isAudioActive,
+      ]
       if let uuid = self.channelUUID {
         result["channelUUID"] = uuid.uuidString
+      }
+      if self.isTransmitting, let source = self.transmitSource {
+        result["source"] = source
       }
       return result
     }
@@ -218,7 +233,36 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
   }
 
   func channelManager(_ channelManager: PTChannelManager, didLeaveChannel channelUUID: UUID, reason: PTChannelLeaveReason) {
+    // システム側(ロック画面の「退出」など)で抜けた場合も参加状態を正しく戻す。
+    // これが無いと getState が参加中のままになり、イヤホンのボタンが効かないのに
+    // 画面は「待機中」と表示し続ける。
+    if module?.channelUUID == channelUUID {
+      module?.channelUUID = nil
+    }
+    module?.isTransmitting = false
+    module?.transmitSource = nil
     module?.emit("onLeave")
+  }
+
+  // 参加・送信の要求が拒否された時の通知(他のアプリで通話中・前面にいない等)。
+  // 以前は未実装で、失敗しても何も起きず「待機中」「準備中」のまま固まっていた。
+  func channelManager(_ channelManager: PTChannelManager, failedToJoinChannel channelUUID: UUID, error: Error) {
+    if module?.channelUUID == channelUUID {
+      module?.channelUUID = nil
+    }
+    module?.emit("onError", ["kind": "join", "message": error.localizedDescription])
+  }
+
+  func channelManager(_ channelManager: PTChannelManager, failedToLeaveChannel channelUUID: UUID, error: Error) {
+    module?.emit("onError", ["kind": "leave", "message": error.localizedDescription])
+  }
+
+  func channelManager(_ channelManager: PTChannelManager, failedToBeginTransmittingInChannel channelUUID: UUID, error: Error) {
+    module?.emit("onError", ["kind": "begin", "message": error.localizedDescription])
+  }
+
+  func channelManager(_ channelManager: PTChannelManager, failedToStopTransmittingInChannel channelUUID: UUID, error: Error) {
+    module?.emit("onError", ["kind": "stop", "message": error.localizedDescription])
   }
 
   // 送信の起点を文字列化する。どの操作で送信が始まったかを画面の診断ログで
@@ -234,10 +278,15 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
   }
 
   func channelManager(_ channelManager: PTChannelManager, channelUUID: UUID, didBeginTransmittingFrom source: PTChannelTransmitRequestSource) {
-    module?.emit("onBeginTransmitting", ["source": sourceName(source)])
+    let name = sourceName(source)
+    module?.isTransmitting = true
+    module?.transmitSource = name
+    module?.emit("onBeginTransmitting", ["source": name])
   }
 
   func channelManager(_ channelManager: PTChannelManager, channelUUID: UUID, didEndTransmittingFrom source: PTChannelTransmitRequestSource) {
+    module?.isTransmitting = false
+    module?.transmitSource = nil
     module?.emit("onEndTransmitting", ["source": sourceName(source)])
   }
 
@@ -254,6 +303,7 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
     rtcSession.useManualAudio = true
     rtcSession.audioSessionDidActivate(audioSession)
     rtcSession.isAudioEnabled = true
+    module?.isAudioActive = true
     module?.emit("onActivateAudio")
   }
 
@@ -262,6 +312,7 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
     rtcSession.isAudioEnabled = false
     rtcSession.audioSessionDidDeactivate(audioSession)
     rtcSession.useManualAudio = false
+    module?.isAudioActive = false
     module?.emit("onDeactivateAudio")
   }
 

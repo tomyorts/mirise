@@ -1,5 +1,11 @@
 import { requireOptionalNativeModule, type EventSubscription } from "expo-modules-core";
 
+/**
+ * onError の payload.kind。参加・送信の要求がシステムに拒否された時に届く
+ * (polish-1 以降のビルド)。
+ */
+export type PttErrorKind = "join" | "leave" | "begin" | "stop";
+
 export type PttChannelEvent =
   | "onJoin"
   | "onLeave"
@@ -13,10 +19,18 @@ export type PttChannelEvent =
 
 export type PttChannelModuleType = {
   /**
-   * ネイティブ側の「本当の参加状態」。JSのstateはアプリ再起動で消えるが、
+   * ネイティブ側の「本当の状態」。JSのstateはアプリ再起動で消えるが、
    * ネイティブは復元後も参加済みのことがある(旧ビルドには無いのでoptional)。
+   * transmitting/audioActive/source は polish-1 以降のビルドのみ。JSの購読前に
+   * 始まった送信(終了されていたアプリをイヤホンで起こした場合)の引き継ぎに使う。
    */
-  getState?: () => { joined: boolean; channelUUID?: string };
+  getState?: () => {
+    joined: boolean;
+    channelUUID?: string;
+    transmitting?: boolean;
+    audioActive?: boolean;
+    source?: string;
+  };
   /** PTTチャンネルに参加(バックグラウンド送信が可能になる)。channelUUIDを返す */
   join(name: string): Promise<string>;
   /** チャンネルから退出 */
