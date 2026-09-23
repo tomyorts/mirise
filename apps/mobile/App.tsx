@@ -5,6 +5,7 @@ import {
   Pressable,
   SafeAreaView,
   ScrollView,
+  Settings,
   StyleSheet,
   Text,
   TextInput,
@@ -65,10 +66,110 @@ const ROOMS = [
   { id: "all", label: "全体" },
 ];
 
+// ---- 端末内に保存する設定(スタッフ名・ルーム・端末ID) ----
+// iOSの NSUserDefaults を使う React Native 標準の Settings を利用する(追加の
+// ライブラリもネイティブ再ビルドも不要)。読み込みが同期的なので、iOSがアプリを
+// バックグラウンドで再起動した直後(イヤホンのボタン押下で起こされた時など)でも、
+// 最初の描画の時点で正しい名前・ルームが揃っている。これが無いと、再起動後の
+// 自動再接続が既定の名前・既定のルームで行われ、別の部屋に声が流れてしまう。
+// ※Android版では Settings が使えないため、Android対応時に置き換えること。
+const SETTINGS_KEYS = {
+  displayName: "mirise.displayName",
+  room: "mirise.room",
+  deviceTag: "mirise.deviceTag",
+} as const;
+
+function readSetting(key: string): string | null {
+  if (Platform.OS !== "ios") return null;
+  try {
+    const value = Settings.get(key);
+    return typeof value === "string" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSettings(values: Record<string, string>) {
+  if (Platform.OS !== "ios") return;
+  try {
+    Settings.set(values);
+  } catch {
+    // 保存できなくても動作は続ける(次回の起動時に再入力になるだけ)。
+  }
+}
+
+// 端末ごとに固定のランダムな識別子(英小文字+数字6桁)。初回に作って保存する。
+let cachedDeviceTag: string | null = null;
+function getDeviceTag(): string {
+  if (cachedDeviceTag) return cachedDeviceTag;
+  const saved = readSetting(SETTINGS_KEYS.deviceTag);
+  if (saved && /^[a-z0-9]{6}$/.test(saved)) {
+    cachedDeviceTag = saved;
+    return saved;
+  }
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let tag = "";
+  for (let i = 0; i < 6; i++) tag += chars[Math.floor(Math.random() * chars.length)];
+  writeSettings({ [SETTINGS_KEYS.deviceTag]: tag });
+  cachedDeviceTag = tag;
+  return tag;
+}
+
+// LiveKit の identity(参加者の内部ID)を作る。
+// 問題: LiveKit は同じ identity で2台目が入ると、先にいた方を強制退出させる。
+// 以前は全端末の既定名が "staff" だったため、端末同士が蹴り合っていた
+// (実機で "Received leave request while trying to (re)connect" を確認)。
+// 対策: identity は「名前+端末ごとの固定ID」で必ず一意にし、画面に出す名前は
+// 別に name として送る。同じ名前のスタッフが複数いても衝突しない。
+// 生成される identity はトークンAPIの現行の文字種チェック
+// (/^[\p{L}\p{N}_\-. ]+$/u、2〜64文字)を必ず通るので、APIが未更新でも動く
+// (その場合は画面上の名前に端末IDが付いて見えるだけ)。
+let IDENTITY_DISALLOWED: RegExp;
+try {
+  IDENTITY_DISALLOWED = new RegExp("[^\\p{L}\\p{N}_\\-.]", "gu");
+} catch {
+  // Unicodeプロパティ指定が使えない環境向けの保険(英数字・かな・カナ・漢字のみ残す)。
+  IDENTITY_DISALLOWED =
+    /[^A-Za-z0-9_\-.\u3041-\u3096\u30a1-\u30fa\u30fc\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g;
+}
+
+function buildIdentity(displayName: string, tag: string): string {
+  let base = displayName;
+  try {
+    base = base.normalize("NFKC");
+  } catch {
+    // normalize 非対応でもそのまま続行
+  }
+  base = base
+    .trim()
+    .replace(/[\s\u3000]+/g, "_")
+    .replace(IDENTITY_DISALLOWED, "")
+    .slice(0, 40);
+  return `${base || "staff"}-${tag}`;
+}
+
+// 画面表示用の名前。新しいトークンAPIでは name がそのまま表示名になる。
+// 旧APIでは name が identity と同じ("富田-a3f2c9")になるので、末尾の端末IDを外す。
+function displayNameOf(p: { name?: string; identity: string }): string {
+  if (p.name && p.name !== p.identity) return p.name;
+  return p.identity.replace(/-[a-z0-9]{6}$/, "");
+}
+
+const DISPLAY_NAME_MAX = 32;
+
 export default function App() {
   const roomRef = useRef<Room | null>(null);
-  const [identity, setIdentity] = useState("staff");
-  const [roomId, setRoomId] = useState("clinic");
+  // スタッフ名(画面表示用)とルーム。前回の値を端末から復元する。
+  const [identity, setIdentity] = useState(() => readSetting(SETTINGS_KEYS.displayName) ?? "");
+  const [roomId, setRoomId] = useState(() => {
+    const saved = readSetting(SETTINGS_KEYS.room);
+    return saved && ROOMS.some((r) => r.id === saved) ? saved : "clinic";
+  });
+  // connect() はイヤホン押下の再接続経路からも呼ばれるため、名前・ルームは
+  // state ではなく ref から読む(state に依存すると入力のたびに connect が
+  // 作り直され、PTTのイベント購読まで張り直しになる)。
+  const identityRef = useRef(identity);
+  const roomIdRef = useRef(roomId);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [micOn, setMicOn] = useState(false);
@@ -202,6 +303,14 @@ export default function App() {
   }, [connected]);
 
   useEffect(() => {
+    identityRef.current = identity;
+  }, [identity]);
+
+  useEffect(() => {
+    roomIdRef.current = roomId;
+  }, [roomId]);
+
+  useEffect(() => {
     const id = setInterval(() => {
       lastAliveRef.current = Date.now();
     }, 3000);
@@ -236,7 +345,18 @@ export default function App() {
 
     const attempt = (async (): Promise<boolean> => {
       const startedAt = Date.now();
-      logDebug("connect: 開始");
+      const displayName = identityRef.current.trim();
+      const room = roomIdRef.current;
+      if (displayName.length === 0) {
+        logDebug("connect: スタッフ名が未入力のため中止");
+        setError("スタッフ名を入力してください");
+        return false;
+      }
+      if (displayName.length > DISPLAY_NAME_MAX) {
+        setError(`スタッフ名は${DISPLAY_NAME_MAX}文字以内で入力してください`);
+        return false;
+      }
+      logDebug(`connect: 開始(${displayName} / ${room})`);
       setError(null);
       setConnecting(true);
       try {
@@ -260,7 +380,11 @@ export default function App() {
         const response = await fetch(TOKEN_ENDPOINT, {
           method: "POST",
           headers,
-          body: JSON.stringify({ identity: identity.trim() || "staff", room: roomId }),
+          body: JSON.stringify({
+            identity: buildIdentity(displayName, getDeviceTag()),
+            name: displayName,
+            room,
+          }),
         });
         const data = (await response.json()) as {
           token?: string;
@@ -272,23 +396,23 @@ export default function App() {
         }
         logDebug(`connect: トークン取得OK(+${Date.now() - startedAt}ms)`);
 
-        const room = new Room();
-        roomRef.current = room;
-        room.on(RoomEvent.Disconnected, () => {
+        const lkRoom = new Room();
+        roomRef.current = lkRoom;
+        lkRoom.on(RoomEvent.Disconnected, () => {
           logDebug("room: Disconnectedイベント");
           setConnected(false);
           setMicOn(false);
         });
         // サーバーが実際に計測した「自分の声の音量」。これが記録されれば、
         // 音声が確実にサーバーまで届いている証拠になる(ローカルの状態だけでは分からない)。
-        room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-          const me = speakers.find((s) => s.sid === room.localParticipant.sid);
+        lkRoom.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+          const me = speakers.find((s) => s.sid === lkRoom.localParticipant.sid);
           if (me) {
             logDebug(`サーバー計測: 自分の音声を検出 level=${me.audioLevel.toFixed(3)}`);
           }
         });
 
-        await room.connect(data.url, data.token);
+        await lkRoom.connect(data.url, data.token);
         logDebug(`connect: room.connect完了(+${Date.now() - startedAt}ms)`);
         // マイクエンジンの「ウォームアップ」: setMicrophoneEnabledは初回のみ
         // createTracks()+publishTrack()という重い処理を行い、2回目以降は
@@ -297,12 +421,17 @@ export default function App() {
         // 済ませておく。これにより、ロック中のPTT操作は毎回軽いmute切替だけで
         // 済むようになり、ロック中に初回の重い処理が走って失敗するのを防ぐ。
         logDebug("connect: マイクウォームアップ開始");
-        await room.localParticipant.setMicrophoneEnabled(true);
-        await room.localParticipant.setMicrophoneEnabled(false);
+        await lkRoom.localParticipant.setMicrophoneEnabled(true);
+        await lkRoom.localParticipant.setMicrophoneEnabled(false);
         logDebug("connect: マイクウォームアップ完了");
         setConnected(true);
         setMicOn(false);
         lastAliveRef.current = Date.now();
+        // 次回起動時(バックグラウンド再起動を含む)に同じ名前・ルームで入れるよう保存。
+        writeSettings({
+          [SETTINGS_KEYS.displayName]: displayName,
+          [SETTINGS_KEYS.room]: room,
+        });
         return true;
       } catch (e) {
         logDebug(`connect: エラー ${e instanceof Error ? e.message : String(e)}`);
@@ -318,7 +447,7 @@ export default function App() {
 
     connectPromiseRef.current = attempt;
     return attempt;
-  }, [cleanup, identity, roomId]);
+  }, [cleanup, logDebug]);
 
   // マイクの実測統計(WebRTC統計)を診断ログに出す。「マイクが実際に音を拾えて
   // いるか(音量/累積エネルギー)」と「サーバーへパケットを送れているか」を
@@ -791,9 +920,11 @@ export default function App() {
             style={styles.input}
             value={identity}
             onChangeText={setIdentity}
-            placeholder="例: Dr.Sato / DH Tanaka"
+            placeholder="例: 佐藤 / DH田中"
             editable={!connected && !connecting}
             autoCapitalize="none"
+            autoCorrect={false}
+            maxLength={DISPLAY_NAME_MAX}
           />
 
           <Text style={[styles.cardLabel, { marginTop: 16 }]}>参加ルーム</Text>
