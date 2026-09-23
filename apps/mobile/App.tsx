@@ -853,6 +853,9 @@ export default function App() {
       `PTT開始要求: stale=${staleMs}ms room.state=${room?.state ?? "なし"} suspectedStale=${suspectedStale}`,
     );
 
+    // 後から新しい送信が始まっていたら、この処理はもう何もしない(新しい送信の
+    // 状態を誤って止めたり、マイクを開いたりしないため)。await のたびに確認する。
+    const superseded = () => txGenRef.current !== gen;
     // 中断時は必ずシステム側の送信も終了させる。この関数が動いている時点で
     // requestBeginTransmittingは成功済み=システムは「送信中」を表示している。
     // ここで黙ってreturnすると、マイクは動いていないのにシステム表示だけが
@@ -871,6 +874,7 @@ export default function App() {
       logDebug("PTT: 高速経路(再接続なし)");
       const activated = await waitAudioActive();
       logDebug(`PTT: audioActive待ち完了(activated=${activated})`);
+      if (superseded()) return;
       if (!txActiveRef.current) {
         logDebug("PTT: audioActive待ち中に離された");
         return;
@@ -896,10 +900,11 @@ export default function App() {
       }),
     ]);
     if (raceTimer) clearTimeout(raceTimer);
+    if (superseded()) return;
     if (result === "timeout") {
       // この送信は諦めてシステムの「送信中」表示を消す(無音のまま送信中が
-      // 続くのを防ぐ)。後から別の送信が始まっていれば、そちらは止めない。
-      if (txGenRef.current === gen) await abortTransmit("再接続タイムアウト");
+      // 続くのを防ぐ)。
+      await abortTransmit("再接続タイムアウト");
       return;
     }
     const ok = result;
@@ -914,6 +919,7 @@ export default function App() {
     }
     const activated = await waitAudioActive();
     logDebug(`PTT: audioActive待ち完了(activated=${activated})`);
+    if (superseded()) return;
     if (!txActiveRef.current) {
       logDebug("PTT: audioActive待ち中に離された");
       return;
