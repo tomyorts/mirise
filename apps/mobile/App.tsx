@@ -2,6 +2,7 @@ import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AppState,
+  Linking,
   Platform,
   Pressable,
   SafeAreaView,
@@ -189,6 +190,64 @@ function errMsg(e: unknown): string {
   return String(e);
 }
 
+// 画面に出すエラー。action=settings なら「設定を開く」ボタンを添える。
+type AppError = { message: string; action?: "settings" };
+
+// 技術的なエラーを、スタッフが自分で対処できる言葉に言い換える。
+// 元のエラー内容は診断ログ(logDebug)の方に残す。
+function toFriendlyError(e: unknown, fallback: string): AppError {
+  const o = (e && typeof e === "object" ? e : {}) as {
+    name?: unknown;
+    status?: unknown;
+  };
+  const name = typeof o.name === "string" ? o.name : "";
+  const status = typeof o.status === "number" ? o.status : undefined;
+  const msg = errMsg(e);
+  if (
+    name === "NotAllowedError" ||
+    name === "SecurityError" ||
+    /permission|not ?allowed|denied/i.test(msg)
+  ) {
+    return {
+      message:
+        "マイクの使用が許可されていません。「設定を開く」→「マイク」をオンにしてから、もう一度お試しください",
+      action: "settings",
+    };
+  }
+  if (name === "AbortError" || /^aborted?$/i.test(msg)) {
+    return {
+      message:
+        "サーバーから応答がありません。電波の弱い場所か、Wi-Fiがインターネットに繋がっていない可能性があります。場所を変えてもう一度お試しください",
+    };
+  }
+  if (status === 401) {
+    return {
+      message: "接続キーが一致しません。アプリが古い可能性があります。管理者に確認してください",
+    };
+  }
+  if (status === 429) {
+    return { message: "接続が集中しています。少し待ってからもう一度お試しください" };
+  }
+  if (status !== undefined && status >= 500) {
+    return { message: "サーバーで問題が起きています。少し待ってからもう一度お試しください" };
+  }
+  if (status !== undefined && status >= 400) {
+    // 入力内容の誤り(名前の文字種など)。サーバーの日本語メッセージをそのまま出す。
+    return { message: msg };
+  }
+  if (/network request failed|network error|internet connection/i.test(msg)) {
+    return {
+      message: "インターネットに接続できません。Wi-Fiまたはモバイル通信を確認してください",
+    };
+  }
+  if (name === "ConnectionError" || /could not establish|signal connection|websocket/i.test(msg)) {
+    return {
+      message: "音声サーバーに接続できませんでした。電波の良い場所でもう一度お試しください",
+    };
+  }
+  return { message: `${fallback}（${msg}）` };
+}
+
 // ネイティブ側のPTTチャンネル参加状態(JSの状態より信頼できる。iOSがアプリを
 // 終了→PushToTalkがチャンネルを復元した直後は、JS側だけが未参加に戻っている)。
 function nativePttJoined(): boolean {
@@ -290,7 +349,16 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [micOn, setMicOn] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setErrorState] = useState<AppError | null>(null);
+  // 画面のエラー表示。null で消す。identity が変わらないので依存配列に入れても
+  // 各コールバックが作り直されることはない。
+  const setError = useCallback((message: string | null, action?: AppError["action"]) => {
+    setErrorState(message ? { message, action } : null);
+  }, []);
+  const showError = useCallback((e: unknown, fallback: string) => {
+    const friendly = toFriendlyError(e, fallback);
+    setErrorState(friendly);
+  }, []);
   // イヤホンが無い時の受信音をスピーカーで鳴らすか(true)、受話口で鳴らすか(false)。
   // 既定はスピーカー: 私物スマホをポケットに入れたままでも聞こえるようにするため。
   // Bluetooth/有線イヤホンが繋がっている時は、どちらの設定でもイヤホンから鳴る。
@@ -546,9 +614,9 @@ export default function App() {
         });
         return true;
       } catch (e) {
-        logDebug(`connect: エラー ${e instanceof Error ? e.message : String(e)}`);
+        logDebug(`connect: エラー ${errMsg(e)}`);
         await cleanup();
-        setError(e instanceof Error ? e.message : "接続に失敗しました");
+        showError(e, "接続に失敗しました");
         return false;
       } finally {
         setConnecting(false);
@@ -634,8 +702,8 @@ export default function App() {
         }
         if (!on) clearAutoOff();
       } catch (e) {
-        logDebug(`setMic(${on}): エラー ${e instanceof Error ? e.message : String(e)}`);
-        setError(e instanceof Error ? e.message : "マイク操作に失敗しました");
+        logDebug(`setMic(${on}): エラー ${errMsg(e)}`);
+        showError(e, "マイクを操作できませんでした");
       }
     },
     [clearAutoOff, logDebug, logMicStats],
@@ -867,7 +935,7 @@ export default function App() {
   // PTTチャンネルに参加/退出。
   const joinPtt = useCallback(async () => {
     if (!PttChannel) {
-      setError("この端末はPushToTalk未対応です(iOS16以上＋開発ビルドが必要)");
+      setError("この端末ではロック中に話す機能を使えません(iOS 16以上が必要です)");
       return;
     }
     setPttBusy(true);
@@ -880,8 +948,11 @@ export default function App() {
       logDebug("PTT参加: リクエスト成功(画面を更新)");
       setPttJoined(true);
     } catch (e) {
-      logDebug(`PTT参加: エラー ${e instanceof Error ? e.message : String(e)}`);
-      setError(e instanceof Error ? e.message : "PTT参加に失敗しました");
+      logDebug(`PTT参加: エラー ${errMsg(e)}`);
+      showError(
+        e,
+        "ロック中に話す機能(PushToTalk)を開始できませんでした。アプリを一度終了して開き直してください",
+      );
     } finally {
       setPttBusy(false);
     }
@@ -1374,7 +1445,17 @@ export default function App() {
 
         {error ? (
           <View style={styles.errorBox}>
-            <Text style={styles.errorText}>{error}</Text>
+            <Text style={styles.errorText}>{error.message}</Text>
+            {error.action === "settings" ? (
+              <Pressable
+                style={styles.errorAction}
+                onPress={() => {
+                  void Linking.openSettings();
+                }}
+              >
+                <Text style={styles.errorActionText}>設定を開く</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
       </ScrollView>
@@ -1495,5 +1576,14 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: 14,
   },
-  errorText: { color: "#a20d1a" },
+  errorText: { color: "#a20d1a", lineHeight: 20 },
+  errorAction: {
+    alignSelf: "flex-start",
+    marginTop: 10,
+    backgroundColor: "#a20d1a",
+    borderRadius: 999,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  errorActionText: { color: "#fff", fontWeight: "700" },
 });
