@@ -12,13 +12,34 @@ public class PttChannelModule: Module {
   fileprivate var managerBox: Any?      // PTChannelManager (iOS16+)
   fileprivate var managerTaskBox: Any?  // Task<PTChannelManager, Error> (iOS16+, 作成中の共有)
   fileprivate var delegateBox: Any?     // PttDelegate (iOS16+)
-  fileprivate var channelUUID: UUID?
   fileprivate var channelName: String = "MIRISE Intercom"
+
+  // 以下の状態は PushToTalk のデリゲート(システムのスレッド)から書かれ、
+  // getState(JSのスレッド)から読まれるため、ロックで保護する。
+  private let stateLock = NSLock()
+  private var _channelUUID: UUID?
+  private var _isTransmitting = false
+  private var _transmitSource: String?
+  private var _isAudioActive = false
+
+  fileprivate var channelUUID: UUID? {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _channelUUID }
+    set { stateLock.lock(); _channelUUID = newValue; stateLock.unlock() }
+  }
   // 送信中か・音声セッションが有効か。JSがイベントを購読する前に起きたことを、
   // 購読後に getState で引き継げるように保持する(下の getState のコメント参照)。
-  fileprivate var isTransmitting = false
-  fileprivate var transmitSource: String?
-  fileprivate var isAudioActive = false
+  fileprivate var isTransmitting: Bool {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _isTransmitting }
+    set { stateLock.lock(); _isTransmitting = newValue; stateLock.unlock() }
+  }
+  fileprivate var transmitSource: String? {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _transmitSource }
+    set { stateLock.lock(); _transmitSource = newValue; stateLock.unlock() }
+  }
+  fileprivate var isAudioActive: Bool {
+    get { stateLock.lock(); defer { stateLock.unlock() }; return _isAudioActive }
+    set { stateLock.lock(); _isAudioActive = newValue; stateLock.unlock() }
+  }
 
   public func definition() -> ModuleDefinition {
     Name("PttChannel")
@@ -190,7 +211,8 @@ public class PttChannelModule: Module {
 
   @available(iOS 16.0, *)
   private func leaveImpl() async throws {
-    if let uuid = channelUUID, let m = managerBox as? PTChannelManager {
+    // 記録が消えていても、システム上で参加中のチャンネルがあれば退出する。
+    if let m = managerBox as? PTChannelManager, let uuid = channelUUID ?? m.activeChannelUUID {
       try await m.leaveChannel(channelUUID: uuid)
     }
     channelUUID = nil
@@ -212,7 +234,10 @@ public class PttChannelModule: Module {
 
   @available(iOS 16.0, *)
   private func endImpl() async {
-    guard let uuid = channelUUID, let m = try? await manager() else { return }
+    guard let m = try? await manager() else { return }
+    // 参加状態の記録が消えていても(退出が拒否された場合など)、システム上で参加中の
+    // チャンネルがあれば止める。自動停止・中断の停止が空振りしないようにするため。
+    guard let uuid = channelUUID ?? m.activeChannelUUID else { return }
     await m.stopTransmitting(channelUUID: uuid)
   }
 }
@@ -254,6 +279,11 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
   }
 
   func channelManager(_ channelManager: PTChannelManager, failedToLeaveChannel channelUUID: UUID, error: Error) {
+    // 抜けられなかった(=まだ参加中)なら参加状態を戻す。leaveImpl は要求の時点で
+    // 記録を消しているため、戻さないと送信の停止や退勤のやり直しが効かなくなる。
+    if channelManager.activeChannelUUID == channelUUID {
+      module?.channelUUID = channelUUID
+    }
     module?.emit("onError", ["kind": "leave", "message": error.localizedDescription])
   }
 
@@ -279,8 +309,11 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
 
   func channelManager(_ channelManager: PTChannelManager, channelUUID: UUID, didBeginTransmittingFrom source: PTChannelTransmitRequestSource) {
     let name = sourceName(source)
-    module?.isTransmitting = true
+    // システムが送信を始めた=このチャンネルには確実に参加している。
+    // 記録が消えていても停止要求が届くように戻しておく。
+    module?.channelUUID = channelUUID
     module?.transmitSource = name
+    module?.isTransmitting = true
     module?.emit("onBeginTransmitting", ["source": name])
   }
 
