@@ -12,7 +12,11 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { AudioSession, registerGlobals } from "@livekit/react-native";
+import {
+  AudioSession,
+  registerGlobals,
+  type AppleAudioCategoryOption,
+} from "@livekit/react-native";
 import {
   AudioDeviceModule,
   AudioEngineMuteMode,
@@ -84,6 +88,7 @@ const SETTINGS_KEYS = {
   displayName: "mirise.displayName",
   room: "mirise.room",
   deviceTag: "mirise.deviceTag",
+  speaker: "mirise.speaker",
 } as const;
 
 function readSetting(key: string): string | null {
@@ -238,6 +243,37 @@ async function fetchToken(body: {
   }
 }
 
+// 音声セッションのカテゴリ設定。失敗しても例外は投げない(throwすると送信自体が
+// 始まらなくなるため)。
+// - voiceChatモードは通話用(HFP)を前提とするため、音楽再生用の
+//   allowBluetoothA2DP を一緒に渡すとBluetooth機器接続時に OSStatus -50
+//   (パラメータ不正)で拒否される。HFPはvoiceChatが暗黙に有効化するので
+//   allowBluetooth だけで足りる。A2DP は絶対に足さないこと。
+// - defaultToSpeaker は「イヤホンが繋がっていない時だけ」スピーカーから鳴らす
+//   指定。これが無いと voiceChat の既定は受話口(耳に当てる小さいスピーカー)に
+//   なり、ポケットの中では聞こえない。イヤホン接続中はイヤホンが優先される。
+// - PushToTalkフレームワークが音声セッションを保持している間は、アプリ側からの
+//   カテゴリ変更が拒否されることがある。その場合セッションは既にPTT側で構成済み
+//   なので、スキップして続行する。
+async function applyAudioCategory(preferSpeaker: boolean, log: (msg: string) => void) {
+  const attempts: AppleAudioCategoryOption[][] = preferSpeaker
+    ? [["allowBluetooth", "defaultToSpeaker"], ["allowBluetooth"]]
+    : [["allowBluetooth"]];
+  for (const options of attempts) {
+    try {
+      await AudioSession.setAppleAudioConfiguration({
+        audioCategory: "playAndRecord",
+        audioMode: "voiceChat",
+        audioCategoryOptions: options,
+      });
+      log(`AudioEngine: カテゴリ設定完了(${options.join("+")})`);
+      return;
+    } catch (configError) {
+      log(`AudioEngine: カテゴリ設定をスキップ(${options.join("+")}: ${errMsg(configError)})`);
+    }
+  }
+}
+
 export default function App() {
   const roomRef = useRef<Room | null>(null);
   // スタッフ名(画面表示用)とルーム。前回の値を端末から復元する。
@@ -255,9 +291,12 @@ export default function App() {
   const [connecting, setConnecting] = useState(false);
   const [micOn, setMicOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 受信音をスピーカーで鳴らすか(true)、受話口/イヤホン側に寄せるか(false)。
+  // イヤホンが無い時の受信音をスピーカーで鳴らすか(true)、受話口で鳴らすか(false)。
   // 既定はスピーカー: 私物スマホをポケットに入れたままでも聞こえるようにするため。
-  const [speakerOn, setSpeakerOn] = useState(true);
+  // Bluetooth/有線イヤホンが繋がっている時は、どちらの設定でもイヤホンから鳴る。
+  const [speakerOn, setSpeakerOn] = useState(() => readSetting(SETTINGS_KEYS.speaker) !== "0");
+  // エンジン連動の処理(再実行しない useEffect)から最新の設定を読むための ref。
+  const speakerOnRef = useRef(speakerOn);
   // Phase B: ポケット/バックグラウンド送信(PushToTalkフレームワーク)。
   const [pttJoined, setPttJoined] = useState(false);
   const [pttBusy, setPttBusy] = useState(false);
@@ -338,28 +377,8 @@ export default function App() {
           logDebug("AudioEngine: stopAudioSession完了");
         } else if (newState.isRecordingEnabled || newState.isPlayoutEnabled) {
           logDebug("AudioEngine: setAppleAudioConfiguration開始");
-          try {
-            // voiceChatモードは通話用(HFP)を前提とするため、音楽再生用の
-            // allowBluetoothA2DP を一緒に渡すとBluetooth機器接続時に
-            // OSStatus -50(パラメータ不正)で拒否される。HFPはvoiceChatが
-            // 暗黙に有効化するので allowBluetooth だけで足りる。
-            await AudioSession.setAppleAudioConfiguration({
-              audioCategory: "playAndRecord",
-              audioMode: "voiceChat",
-              audioCategoryOptions: ["allowBluetooth"],
-            });
-            logDebug("AudioEngine: setAppleAudioConfiguration完了");
-          } catch (configError) {
-            // PushToTalkフレームワークが音声セッションを保持している間は、
-            // アプリ側からのカテゴリ変更が拒否されることがある。その場合
-            // セッションは既にPTT側で適切に構成済みなので、失敗しても
-            // 処理を止めずに続行する(ここでthrowすると送信自体が始まらない)。
-            logDebug(
-              `AudioEngine: カテゴリ設定をスキップ(${
-                configError instanceof Error ? configError.message : String(configError)
-              })`,
-            );
-          }
+          // 失敗してもthrowしない(内部で握りつぶしてログだけ残す)。
+          await applyAudioCategory(speakerOnRef.current, logDebug);
           if (!oldState.isPlayoutEnabled && !oldState.isRecordingEnabled) {
             logDebug("AudioEngine: startAudioSession開始");
             await AudioSession.startAudioSession();
@@ -935,22 +954,31 @@ export default function App() {
     logDebug("退勤: 完了");
   }, [cleanup, logDebug]);
 
-  // 受信音の出力先を切り替える。
+  // イヤホンが無い時の受信音の出力先を切り替える(設定は端末に保存)。
   // スピーカー: ポケットに入れたままでも聞こえる(既定)。
-  // 受話口(静音): 患者の前などで周囲に聞かせたくない時。Bluetoothイヤホンを
-  // 着けている場合は、そちらへ自動で流れる(iOSが優先する)。
+  // 受話口(静音): 患者の前などで周囲に聞かせたくない時。
+  // どちらの設定でも、Bluetooth/有線イヤホン接続中はイヤホンから鳴る。
+  // 注意: selectAudioOutput("force_speaker") は使わない。これはイヤホン接続中でも
+  // 強制的に本体スピーカーへ鳴らす指定で、ポケットから大音量で流れる事故になる。
+  // 代わりにカテゴリの defaultToSpeaker の有無で切り替え、手動の上書きは解除する。
+  // ここでは音声セッションの開始/停止はしない(自動管理と競合させない)。
   const toggleSpeaker = useCallback(() => {
-    const next = !speakerOn;
+    const next = !speakerOnRef.current;
+    speakerOnRef.current = next;
     setSpeakerOn(next);
+    writeSettings({ [SETTINGS_KEYS.speaker]: next ? "1" : "0" });
+    logDebug(`音声出力: イヤホン無しの時は${next ? "スピーカー" : "受話口"}に設定`);
     void (async () => {
       try {
-        await AudioSession.selectAudioOutput(next ? "force_speaker" : "default");
-        logDebug(`音声出力: ${next ? "スピーカー" : "受話口/イヤホン"}に切替`);
+        await AudioSession.selectAudioOutput("default");
       } catch (e) {
-        logDebug(`音声出力の切替に失敗 ${e instanceof Error ? e.message : String(e)}`);
+        logDebug(`音声出力: 上書き解除に失敗 ${errMsg(e)}`);
       }
+      // 受信中(音声セッション使用中)ならその場で反映する。未使用なら何もしなくても
+      // 次に音声エンジンが動く時に新しい設定で構成される。
+      await applyAudioCategory(next, logDebug);
     })();
-  }, [speakerOn, logDebug]);
+  }, [logDebug]);
 
   // 「話す」ホールド: 押している間だけ送信(PTKit経由)。
   const pttPressIn = useCallback(() => {
@@ -1218,7 +1246,9 @@ export default function App() {
 
             <Pressable style={styles.toggle} onPress={toggleSpeaker}>
               <Text style={styles.toggleText}>
-                {speakerOn ? "🔊 受信音: スピーカー" : "🔇 受信音: 受話口（静音）"}
+                {speakerOn
+                  ? "🔊 イヤホン無しの時: スピーカーで鳴らす"
+                  : "🔈 イヤホン無しの時: 受話口で鳴らす（静音）"}
               </Text>
             </Pressable>
 
