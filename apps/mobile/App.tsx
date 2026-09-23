@@ -562,6 +562,8 @@ export default function App() {
 
         const lkRoom = new Room();
         roomRef.current = lkRoom;
+        // 一度でも接続が確立したか。確立前の失敗で自動再接続を繰り返さないために使う。
+        let established = false;
         lkRoom.on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
           // 作り直し前の古い接続から遅れて届いたイベントは無視する。
           if (roomRef.current !== lkRoom) return;
@@ -581,6 +583,23 @@ export default function App() {
           // LiveKitが自動再接続を諦めた(レントゲン室など電波の届かない場所に
           // 1分以上いた等)。以前は何も表示せず、受信が止まったままになっていた。
           setError("通信が途切れました。画面を開くか、イヤホンのボタンを押すと自動で再接続します");
+          // 画面を見ている最中に切れた場合は「前面に戻る」きっかけが無いので、
+          // ここで1回だけ自動で再接続を試す(失敗したらエラー表示のまま、ボタンで再試行)。
+          if (established && wantConnectedRef.current && AppState.currentState === "active") {
+            setTimeout(() => {
+              const current = roomRef.current;
+              const stillDown = !current || current.state === ConnectionState.Disconnected;
+              if (
+                wantConnectedRef.current &&
+                stillDown &&
+                !connectPromiseRef.current &&
+                AppState.currentState === "active"
+              ) {
+                logDebug("切断後: 画面表示中のため自動で再接続");
+                void connect();
+              }
+            }, 3000);
+          }
         });
         // サーバーが実際に計測した「自分の声の音量」。これが記録されれば、
         // 音声が確実にサーバーまで届いている証拠になる(ローカルの状態だけでは分からない)。
@@ -603,6 +622,7 @@ export default function App() {
         await lkRoom.localParticipant.setMicrophoneEnabled(true);
         await lkRoom.localParticipant.setMicrophoneEnabled(false);
         logDebug("connect: マイクウォームアップ完了");
+        established = true;
         setConnected(true);
         setMicOn(false);
         lastAliveRef.current = Date.now();
