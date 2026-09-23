@@ -182,6 +182,10 @@ try {
 // 診断ログの保持行数。
 const DEBUG_LOG_MAX = 80;
 
+// iOSのメジャーバージョン(イヤホンのボタンでの送信は iOS 17 以降のみ)。
+const IOS_MAJOR = Platform.OS === "ios" ? parseInt(String(Platform.Version), 10) || 0 : 0;
+const ACCESSORY_DEFAULT: boolean | null = IOS_MAJOR >= 17 ? null : false;
+
 // 画面上部の状態表示の色。
 const STATUS_COLORS = {
   idle: "#98a2b3",
@@ -426,6 +430,12 @@ export default function App() {
   const [remoteSpeakers, setRemoteSpeakers] = useState<string[]>([]);
   // 「詳細設定・診断」を開いているか。
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  // イヤホンのボタンを送信操作に割り当てられたか(null=まだ分からない)。
+  // iOS 16 や割り当て失敗の時に「イヤホンのボタンで話せます」と誤表示しないため。
+  const [accessoryOk, setAccessoryOk] = useState<boolean | null>(ACCESSORY_DEFAULT);
+  // 勤務中か(wantConnectedRef と同じ意味の表示用)。PTT未参加のまま通信が途切れた時にも
+  // 「勤務外」と表示せず、退勤ボタンを出し続けるために使う。
+  const [shiftOn, setShiftOn] = useState(false);
   // トグル判定を最新値で行うための参照 + 自動OFFタイマー。
   const micOnRef = useRef(false);
   const autoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -646,12 +656,21 @@ export default function App() {
           if (reason === DisconnectReason.DUPLICATE_IDENTITY) {
             // 同じIDの別の接続に置き換えられた。自動再接続すると取り合いになる。
             wantConnectedRef.current = false;
-            setError("同じ端末の別の接続に切り替わったため切断されました。「再接続する」を押してください");
+            setShiftOn(false);
+            setError(
+              `同じ名前・端末IDの別の接続があったため切断されました。${
+                pttJoinedRef.current ? "「再接続する」" : "「出勤する」"
+              }を押すと、こちらに切り替わります`,
+            );
             return;
           }
           // LiveKitが自動再接続を諦めた(レントゲン室など電波の届かない場所に
           // 1分以上いた等)。以前は何も表示せず、受信が止まったままになっていた。
-          setError("通信が途切れました。画面を開くか、イヤホンのボタンを押すと自動で再接続します");
+          setError(
+            pttJoinedRef.current
+              ? "通信が途切れました。画面を開くか、イヤホンのボタンを押すと自動で再接続します"
+              : "通信が途切れました。電波の届く場所で「再接続する」を押してください（アプリを開き直しても再接続します）",
+          );
           // 画面を見ている最中に切れた場合は「前面に戻る」きっかけが無いので、
           // ここで1回だけ自動で再接続を試す(失敗したらエラー表示のまま、ボタンで再試行)。
           if (established && wantConnectedRef.current && AppState.currentState === "active") {
@@ -705,6 +724,7 @@ export default function App() {
         setMicOn(false);
         lastAliveRef.current = Date.now();
         wantConnectedRef.current = true;
+        setShiftOn(true);
         // 次回起動時(バックグラウンド再起動を含む)に同じ名前・ルームで入れるよう保存。
         writeSettings({
           [SETTINGS_KEYS.displayName]: displayName,
@@ -995,6 +1015,7 @@ export default function App() {
       PttChannel.addListener("onLeave", () => {
         logDebug("PTTイベント: onLeave");
         setPttJoined(false);
+        setAccessoryOk(ACCESSORY_DEFAULT);
       }),
       PttChannel.addListener("onBeginTransmitting", (payload) => {
         handleBegin((payload?.source as string | undefined) ?? "不明");
@@ -1032,6 +1053,7 @@ export default function App() {
       PttChannel.addListener("onAccessoryButton", (payload) => {
         // イヤホン等のボタンを送信操作に割り当てられたか(iOS17+)。
         // これが有効なら、ポケットに入れたままイヤホンのボタンで送信できる。
+        setAccessoryOk(!!payload?.enabled);
         if (payload?.enabled) {
           logDebug("イヤホンのボタン: Apple公式経路を有効化");
         } else if (payload?.error) {
@@ -1168,6 +1190,7 @@ export default function App() {
     logDebug("退勤: 開始");
     setError(null);
     wantConnectedRef.current = false;
+    setShiftOn(false);
     txActiveRef.current = false;
     bleTxIntentRef.current = false;
     bleToggleInitiatedRef.current = false;
@@ -1255,6 +1278,12 @@ export default function App() {
   // 状態が揃い、イヤホンのボタンでの送信と取り合いにならない。
   // 未参加(iOS16未満など)なら、接続中のマイクを直接ON/OFFする。
   const talkPressIn = useCallback(() => {
+    // 接続もPTTも無い時は何も送れない(押している最中に無効化すると離した操作が
+    // 届かなくなることがあるため、ボタン自体は無効化せずここで案内する)。
+    if (!connectedRef.current && !pttJoinedRef.current) {
+      setError("接続されていません。「再接続する」を押してから話してください");
+      return;
+    }
     setHolding(true);
     setError(null);
     if (pttJoinedRef.current && PttChannel) {
@@ -1339,6 +1368,7 @@ export default function App() {
         await PttChannel?.setAccessoryButtonEnabled?.(true);
       } catch (e) {
         logDebug(`イヤホンのボタン有効化に失敗 ${e instanceof Error ? e.message : String(e)}`);
+        setAccessoryOk(false);
       }
     })();
   }, [pttJoined, logDebug]);
@@ -1355,10 +1385,30 @@ export default function App() {
         setPttJoined(true);
         // PTTチャンネルに参加中=勤務中。iOSがアプリを終了→復元した場合も含む。
         wantConnectedRef.current = true;
+        setShiftOn(true);
+      }
+      // 名前が空なら端末の保存内容を読み直す(再起動直後に読めなかった場合など)。
+      // ルームも必ず一緒に読み直す(名前だけ戻すと既定のルームに入ってしまうため)。
+      if (!identityRef.current.trim()) {
+        const savedName = readSetting(SETTINGS_KEYS.displayName);
+        if (savedName && savedName.trim()) {
+          identityRef.current = savedName;
+          setIdentity(savedName);
+          const savedRoom = readSetting(SETTINGS_KEYS.room);
+          if (savedRoom && ROOMS.some((r) => r.id === savedRoom)) {
+            roomIdRef.current = savedRoom;
+            setRoomId(savedRoom);
+          }
+        }
       }
       const room = roomRef.current;
       const disconnected = !room || room.state === ConnectionState.Disconnected;
-      if (wantConnectedRef.current && disconnected && !connectPromiseRef.current) {
+      if (
+        wantConnectedRef.current &&
+        disconnected &&
+        !connectPromiseRef.current &&
+        identityRef.current.trim()
+      ) {
         logDebug("前面復帰: 勤務中のため自動で再接続");
         void connect();
       }
@@ -1424,21 +1474,30 @@ export default function App() {
     };
   }, [cleanup]);
 
-  const onShift = connected || pttJoined;
+  const onShift = shiftOn || connected || pttJoined;
+  // 勤務中なのに名前が無い(名前を保存する前の版から更新した直後に、iOSがチャンネルを
+  // 復元した場合など)。入力欄を隠すと先に進めなくなるので、その時は出す。
+  const needsName = identity.trim().length === 0;
   const roomLabel = ROOMS.find((r) => r.id === roomId)?.label ?? roomId;
   // 画面上部に出す現在の状態。
   const statusView: { tone: "idle" | "ok" | "busy" | "warn" | "live"; text: string } = micOn
     ? { tone: "live", text: "送信中 — あなたの声が流れています" }
     : connected
-      ? {
-          tone: "ok",
-          text: pttJoined ? "待機中 — イヤホンのボタンで話せます" : "待機中 — 画面のボタンで話せます",
-        }
+      ? !pttJoined
+        ? { tone: "ok", text: "待機中 — 画面のボタンで話せます" }
+        : accessoryOk === false
+          ? {
+              tone: "warn",
+              text: "待機中 — このiPhoneではイヤホンのボタンは使えません。ロック画面のトークボタンで話せます",
+            }
+          : { tone: "ok", text: "待機中 — イヤホンのボタンで話せます" }
       : connecting
         ? { tone: "busy", text: "接続中…" }
         : pttJoined
           ? { tone: "warn", text: "通信が途切れています — 話すと自動で再接続します" }
-          : { tone: "idle", text: "勤務外（未接続）" };
+          : onShift
+            ? { tone: "warn", text: "通信が途切れています — 「再接続する」を押してください" }
+            : { tone: "idle", text: "勤務外（未接続）" };
   const talkLabel = holding
     ? micOn
       ? "話しています…（離すと終了）"
@@ -1482,7 +1541,7 @@ export default function App() {
             <Text style={styles.statusText}>{statusView.text}</Text>
           </View>
 
-          {onShift ? (
+          {onShift && !needsName ? (
             <Text style={styles.shiftSummary}>
               {identity.trim()} ・ {roomLabel}
             </Text>
@@ -1562,7 +1621,11 @@ export default function App() {
             ) : null}
 
             <Pressable
-              style={[styles.ptt, (micOn || holding) && styles.pttOn]}
+              style={[
+                styles.ptt,
+                (micOn || holding) && styles.pttOn,
+                !connected && !pttJoined && styles.disabled,
+              ]}
               onPressIn={talkPressIn}
               onPressOut={talkPressOut}
             >
@@ -1671,7 +1734,9 @@ export default function App() {
             </Text>
             {bleStatus.registered && !pttJoined ? (
               <Text style={[styles.hint, { color: "#b76e00" }]}>
-                ⚠️ ロック中にBLEボタンを使うには「出勤する」でロック中に話す機能も準備してください。
+                {connected
+                  ? "⚠️ ロック中にBLEボタンを使うには「ロック中でも話せるようにする」を押してください。"
+                  : "⚠️ ロック中にBLEボタンを使うには「出勤する」を押してください（ロック中に話す機能も準備されます）。"}
               </Text>
             ) : null}
             {bleBusy && bleDetail ? (
