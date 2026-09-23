@@ -1,6 +1,7 @@
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AppState,
   Platform,
   Pressable,
   SafeAreaView,
@@ -162,6 +163,36 @@ function displayNameOf(p: { name?: string; identity: string }): string {
 }
 
 const DISPLAY_NAME_MAX = 32;
+
+// エラーを診断ログ用の文字列にする。react-native-webrtc のエラーは Error の
+// インスタンスではないことがあり、String(e) だと "[object Object]" になって
+// 原因が分からなくなるため、name/message を取り出す。
+function errMsg(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (e && typeof e === "object") {
+    const o = e as { name?: unknown; message?: unknown };
+    const parts = [o.name, o.message].filter(
+      (x): x is string => typeof x === "string" && x.length > 0,
+    );
+    if (parts.length) return parts.join(": ");
+    try {
+      return JSON.stringify(e);
+    } catch {
+      // noop
+    }
+  }
+  return String(e);
+}
+
+// ネイティブ側のPTTチャンネル参加状態(JSの状態より信頼できる。iOSがアプリを
+// 終了→PushToTalkがチャンネルを復元した直後は、JS側だけが未参加に戻っている)。
+function nativePttJoined(): boolean {
+  try {
+    return typeof PttChannel?.getState === "function" ? PttChannel.getState().joined : false;
+  } catch {
+    return false;
+  }
+}
 
 export default function App() {
   const roomRef = useRef<Room | null>(null);
@@ -783,6 +814,59 @@ export default function App() {
     }
   }, []);
 
+  // 出勤: 接続してから、ロック中の送信(PTTチャンネル)も自動で準備する。
+  // 以前は「接続する」と「PTTを有効化」が別のボタンで、2つ目を押し忘れると
+  // ポケットの中でイヤホンのボタンを押しても送信できなかった。
+  const startShift = useCallback(async () => {
+    const ok = await connect();
+    if (!ok || !PttChannel) return;
+    if (pttJoinedRef.current || nativePttJoined()) {
+      // 既に参加済み(復元されたチャンネルなど)。二重参加はしない。
+      setPttJoined(true);
+      return;
+    }
+    await joinPtt();
+  }, [connect, joinPtt]);
+
+  // 退勤: 送信を止め、PTTチャンネルから退出してから切断する。
+  // 以前の「切断する」はLiveKitだけを切り、PTTチャンネルは参加したままだった。
+  // そのため退勤後(通勤中に音楽を聴く時など)にイヤホンの再生ボタンを押すと、
+  // 自動で再接続して診療室にマイクが開いてしまっていた。
+  const endShift = useCallback(async () => {
+    logDebug("退勤: 開始");
+    txActiveRef.current = false;
+    bleTxIntentRef.current = false;
+    bleToggleInitiatedRef.current = false;
+    screenHoldRef.current = false;
+    if (bleTxAutoOffRef.current) {
+      clearTimeout(bleTxAutoOffRef.current);
+      bleTxAutoOffRef.current = null;
+    }
+    if (PttChannel) {
+      try {
+        await PttChannel.endTransmitting();
+      } catch {
+        // 送信中でなければ何もしない
+      }
+      if (pttJoinedRef.current || nativePttJoined()) {
+        setPttBusy(true);
+        try {
+          await PttChannel.leave();
+          setPttJoined(false);
+          logDebug("退勤: PTTチャンネルから退出");
+        } catch (e) {
+          // 退出できないままだとイヤホンのボタンが生きているので、黙って流さない。
+          logDebug(`退勤: PTT退出に失敗 ${errMsg(e)}`);
+          setError("ロック中の送信を解除できませんでした。もう一度「退勤する」を押してください");
+        } finally {
+          setPttBusy(false);
+        }
+      }
+    }
+    await cleanup();
+    logDebug("退勤: 完了");
+  }, [cleanup, logDebug]);
+
   // 受信音の出力先を切り替える。
   // スピーカー: ポケットに入れたままでも聞こえる(既定)。
   // 受話口(静音): 患者の前などで周囲に聞かせたくない時。Bluetoothイヤホンを
@@ -885,6 +969,21 @@ export default function App() {
     })();
   }, [pttJoined, logDebug]);
 
+  // ネイティブ側のPTT参加状態を画面に反映する(起動時と前面に戻った時)。
+  // iOSがアプリを終了→PushToTalkがチャンネルを復元した場合、JSは未参加の状態で
+  // 始まるが実際にはイヤホンのボタンが生きている。これを反映しないと、画面上は
+  // 「勤務外」なのにイヤホンで送信できてしまい、退勤ボタンも出ない。
+  useEffect(() => {
+    const sync = () => {
+      if (nativePttJoined()) setPttJoined(true);
+    };
+    sync();
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") sync();
+    });
+    return () => sub.remove();
+  }, []);
+
   // BLEボタンのイベント購読 + 起動時の接続維持開始。
   useEffect(() => {
     if (!BleButton) return;
@@ -958,7 +1057,7 @@ export default function App() {
             value={identity}
             onChangeText={setIdentity}
             placeholder="例: 佐藤 / DH田中"
-            editable={!connected && !connecting}
+            editable={!connected && !connecting && !pttJoined}
             autoCapitalize="none"
             autoCorrect={false}
             maxLength={DISPLAY_NAME_MAX}
@@ -971,7 +1070,7 @@ export default function App() {
               return (
                 <Pressable
                   key={room.id}
-                  onPress={() => !connected && setRoomId(room.id)}
+                  onPress={() => !connected && !pttJoined && setRoomId(room.id)}
                   style={[styles.roomChip, selected && styles.roomChipOn]}
                 >
                   <Text style={[styles.roomChipText, selected && styles.roomChipTextOn]}>
@@ -982,17 +1081,36 @@ export default function App() {
             })}
           </View>
 
-          {!connected ? (
-            <Pressable
-              style={[styles.primary, connecting && styles.disabled]}
-              onPress={() => void connect()}
-              disabled={connecting}
-            >
-              <Text style={styles.primaryText}>{connecting ? "接続中..." : "接続する"}</Text>
-            </Pressable>
+          {connected || pttJoined ? (
+            <>
+              {!connected ? (
+                <Pressable
+                  style={[styles.primary, connecting && styles.disabled]}
+                  onPress={() => void startShift()}
+                  disabled={connecting}
+                >
+                  <Text style={styles.primaryText}>
+                    {connecting ? "接続中..." : "再接続する"}
+                  </Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                style={[styles.secondary, pttBusy && styles.disabled]}
+                onPress={() => void endShift()}
+                disabled={pttBusy}
+              >
+                <Text style={styles.secondaryText}>退勤する（切断）</Text>
+              </Pressable>
+            </>
           ) : (
-            <Pressable style={styles.secondary} onPress={() => void cleanup()}>
-              <Text style={styles.secondaryText}>切断する</Text>
+            <Pressable
+              style={[styles.primary, (connecting || pttBusy) && styles.disabled]}
+              onPress={() => void startShift()}
+              disabled={connecting || pttBusy}
+            >
+              <Text style={styles.primaryText}>
+                {connecting ? "接続中..." : "出勤する（接続）"}
+              </Text>
             </Pressable>
           )}
         </View>
