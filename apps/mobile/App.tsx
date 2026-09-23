@@ -812,6 +812,9 @@ export default function App() {
   // タップ/ハードボタン用トグル: ONにしたら AUTO_OFF_MS で自動OFF。
   const toggleMic = useCallback(() => {
     const next = !micOnRef.current;
+    // 意図をすぐ記録する。micOnRef は送信の切替が終わってから更新されるため、
+    // その間の2度目の押下が「停止」でなく「再開始」になってしまうのを防ぐ。
+    micOnRef.current = next;
     void setMic(next);
     clearAutoOff();
     if (next) {
@@ -976,6 +979,9 @@ export default function App() {
             byBle ? "BLEボタン: 自動停止(切り忘れ防止)" : "イヤホン: 自動停止(切り忘れ防止)",
           );
           void PttChannel?.endTransmitting();
+          // システム側の停止が失敗しても(停止通知が来なくても)、マイクは必ず閉じる。
+          txActiveRef.current = false;
+          void setMic(false);
         }, byBle ? AUTO_OFF_MS : EARPHONE_AUTO_OFF_MS);
       }
       void pttTransmitStart();
@@ -1044,9 +1050,20 @@ export default function App() {
           // 戻し、次の押下がまた「開始」になるようにする。
           bleTxIntentRef.current = false;
           bleToggleInitiatedRef.current = false;
-          if (screenHoldRef.current) {
+          // 既に送信中(イヤホンで開始済み)の時に画面のボタンを押した場合も
+          // 「送信中」として拒否されるが、離せば止まるので案内は出さない。
+          if (screenHoldRef.current && !txActiveRef.current && !micOnRef.current) {
             setError("送信を開始できませんでした（通話中などの可能性）。もう一度押してください");
           }
+        } else if (kind === "stop") {
+          // システム側で送信を止められなかった。少なくともマイクは閉じる。
+          txActiveRef.current = false;
+          void setMic(false);
+        } else if (kind === "leave") {
+          // 退勤でPTTチャンネルから抜けられなかった。イヤホンのボタンが生きている
+          // 可能性があるので、黙って流さず、退勤をやり直せるようにする。
+          setPttJoined(nativePttJoined());
+          setError("ロック中の送信を解除できませんでした。もう一度「退勤する」を押してください");
         } else if (kind === "join") {
           setPttJoined(false);
           setError(
@@ -1086,6 +1103,19 @@ export default function App() {
       // JSだけリロードされた直後などは、ネイティブ側は既に参加済みで
       // didJoinChannel(onJoinイベント)が再度発火しないことがある。
       // join()のリクエスト自体が成功した時点で画面も確実に更新する。
+      // ただし参加要求はシステム側で後から拒否されることがあり(他のアプリで通話中など)、
+      // その通知(onError kind=join)が先に届いていれば、ネイティブは未参加に戻っている。
+      // その場合に「参加済み」で上書きしない(待機中と表示されるのにイヤホンが効かなくなる)。
+      let joinedNow = true;
+      try {
+        if (typeof PttChannel.getState === "function") joinedNow = PttChannel.getState().joined;
+      } catch {
+        // 状態が取れなければ従来どおり参加済みとして扱う
+      }
+      if (!joinedNow) {
+        logDebug("PTT参加: システムに拒否された(エラー表示済み)");
+        return;
+      }
       logDebug("PTT参加: リクエスト成功(画面を更新)");
       setPttJoined(true);
     } catch (e) {
