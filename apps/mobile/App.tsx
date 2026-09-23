@@ -90,6 +90,7 @@ const SETTINGS_KEYS = {
   room: "mirise.room",
   deviceTag: "mirise.deviceTag",
   speaker: "mirise.speaker",
+  clockedOut: "mirise.clockedOut",
 } as const;
 
 function readSetting(key: string): string | null {
@@ -430,6 +431,11 @@ export default function App() {
   const [remoteSpeakers, setRemoteSpeakers] = useState<string[]>([]);
   // 「詳細設定・診断」を開いているか。
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  // 名前が保存されていない(勤務中の復元時に名前の入力が必要)。入力中に1文字目で
+  // 入力欄が消えないよう、入力内容ではなく「保存済みの名前が無い」ことで判断する。
+  const [nameMissing, setNameMissing] = useState(
+    () => !(readSetting(SETTINGS_KEYS.displayName) ?? "").trim(),
+  );
   // イヤホンのボタンを送信操作に割り当てられたか(null=まだ分からない)。
   // iOS 16 や割り当て失敗の時に「イヤホンのボタンで話せます」と誤表示しないため。
   const [accessoryOk, setAccessoryOk] = useState<boolean | null>(ACCESSORY_DEFAULT);
@@ -446,6 +452,12 @@ export default function App() {
   // これが無いと、再接続の最中に退勤すると、退勤後に接続が完了して
   // 勤務中に戻ってしまう(出勤処理ではイヤホンのボタンまで再び有効になる)。
   const shiftGenRef = useRef(0);
+  // 退勤済みか(端末に保存し、アプリが終了→再起動されても引き継ぐ)。退勤時のPTT退出が
+  // システムに拒否されてチャンネルが残った場合でも、退勤後にイヤホンのボタンで
+  // 再接続・送信しないための最後の砦。出勤で解除する。
+  const clockedOutRef = useRef(readSetting(SETTINGS_KEYS.clockedOut) === "1");
+  // 画面表示用(退勤の処理が完了していない時の案内に使う)。
+  const [clockedOut, setClockedOut] = useState(clockedOutRef.current);
   // 進行中の接続(connectPromiseRef)がどの世代で始まったか。
   const connectGenRef = useRef(0);
   // PTT送信の意図(トークボタンを押している間true)。
@@ -730,6 +742,7 @@ export default function App() {
           [SETTINGS_KEYS.displayName]: displayName,
           [SETTINGS_KEYS.room]: room,
         });
+        setNameMissing(false);
         return true;
       } catch (e) {
         logDebug(`connect: エラー ${errMsg(e)}`);
@@ -804,6 +817,8 @@ export default function App() {
       const room = roomRef.current;
       if (!room) {
         logDebug(`setMic(${on}): roomなしのため無視`);
+        // トグル側が先に記録した「意図」を実態(OFF)に戻す(次の押下が空振りしないように)。
+        micOnRef.current = false;
         return;
       }
       try {
@@ -823,6 +838,8 @@ export default function App() {
         if (!on) clearAutoOff();
       } catch (e) {
         logDebug(`setMic(${on}): エラー ${errMsg(e)}`);
+        // 切替に失敗したら、トグル側が先に記録した「意図」を実態に戻す。
+        micOnRef.current = room.localParticipant.isMicrophoneEnabled;
         showError(e, "マイクを操作できませんでした");
       }
     },
@@ -972,6 +989,14 @@ export default function App() {
     // 送信の引き継ぎの両方から呼ぶ)。
     const handleBegin = (source: string) => {
       logDebug(`PTT送信開始: ${source}`);
+      // 退勤済みなのにチャンネルが残っていた(退出がシステムに拒否された等)。
+      // 再接続も送信もせずに止め、退出をやり直す(帰宅後の誤送信を防ぐ)。
+      if (clockedOutRef.current) {
+        logDebug("PTT: 退勤済みのため送信しない → 退出をやり直す");
+        void PttChannel?.endTransmitting();
+        void PttChannel?.leave().catch(() => {});
+        return;
+      }
       // アプリが要求した送信(画面のボタン/BLEボタン)なのに、確定した時点で
       // 画面のボタンは離されており、BLEも送信の意図が無い(2度押しで取り消し
       // 済み)なら、誰も話していない。マイクを開かずに即終了する。
@@ -1168,6 +1193,9 @@ export default function App() {
   // 以前は「接続する」と「PTTを有効化」が別のボタンで、2つ目を押し忘れると
   // ポケットの中でイヤホンのボタンを押しても送信できなかった。
   const startShift = useCallback(async () => {
+    clockedOutRef.current = false;
+    setClockedOut(false);
+    writeSettings({ [SETTINGS_KEYS.clockedOut]: "0" });
     const gen = shiftGenRef.current;
     const ok = await connect();
     // 接続中に退勤された場合は、ロック中の送信(PTT)を準備しない。
@@ -1187,6 +1215,9 @@ export default function App() {
   const endShift = useCallback(async () => {
     // 最初に(awaitより前に)世代を進め、進行中の接続・出勤処理を中止させる。
     shiftGenRef.current += 1;
+    clockedOutRef.current = true;
+    setClockedOut(true);
+    writeSettings({ [SETTINGS_KEYS.clockedOut]: "1" });
     logDebug("退勤: 開始");
     setError(null);
     wantConnectedRef.current = false;
@@ -1381,6 +1412,16 @@ export default function App() {
   // バックグラウンドで接続するとマイクのウォームアップが走るため行わない)。
   useEffect(() => {
     const onActive = () => {
+      if (clockedOutRef.current) {
+        // 退勤済み。チャンネルが残っていれば退出をやり直し、自動再接続はしない。
+        if (nativePttJoined()) {
+          logDebug("前面復帰: 退勤済みなのにPTTに参加中 → 退出をやり直す");
+          void PttChannel?.leave()
+            .then(() => setPttJoined(nativePttJoined()))
+            .catch(() => setPttJoined(true));
+        }
+        return;
+      }
       if (nativePttJoined()) {
         setPttJoined(true);
         // PTTチャンネルに参加中=勤務中。iOSがアプリを終了→復元した場合も含む。
@@ -1399,6 +1440,7 @@ export default function App() {
             roomIdRef.current = savedRoom;
             setRoomId(savedRoom);
           }
+          setNameMissing(false);
         }
       }
       const room = roomRef.current;
@@ -1475,9 +1517,9 @@ export default function App() {
   }, [cleanup]);
 
   const onShift = shiftOn || connected || pttJoined;
-  // 勤務中なのに名前が無い(名前を保存する前の版から更新した直後に、iOSがチャンネルを
-  // 復元した場合など)。入力欄を隠すと先に進めなくなるので、その時は出す。
-  const needsName = identity.trim().length === 0;
+  // 勤務中なのに名前が保存されていない(名前を保存する前の版から更新した直後に、
+  // iOSがチャンネルを復元した場合など)。入力欄を隠すと先に進めなくなるので、その時は出す。
+  const needsName = nameMissing && !connected;
   const roomLabel = ROOMS.find((r) => r.id === roomId)?.label ?? roomId;
   // 画面上部に出す現在の状態。
   const statusView: { tone: "idle" | "ok" | "busy" | "warn" | "live"; text: string } = micOn
@@ -1494,7 +1536,12 @@ export default function App() {
       : connecting
         ? { tone: "busy", text: "接続中…" }
         : pttJoined
-          ? { tone: "warn", text: "通信が途切れています — 話すと自動で再接続します" }
+          ? clockedOut
+            ? {
+                tone: "warn",
+                text: "退勤の処理が完了していません — もう一度「退勤する」を押してください",
+              }
+            : { tone: "warn", text: "通信が途切れています — 話すと自動で再接続します" }
           : onShift
             ? { tone: "warn", text: "通信が途切れています — 「再接続する」を押してください" }
             : { tone: "idle", text: "勤務外（未接続）" };
@@ -1614,7 +1661,7 @@ export default function App() {
           )}
         </View>
 
-        {onShift ? (
+        {onShift && !clockedOut ? (
           <View style={styles.card}>
             {remoteSpeakers.length > 0 ? (
               <Text style={styles.speakingNow}>🗣 {remoteSpeakers.join("、")} が話しています</Text>
