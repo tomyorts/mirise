@@ -431,6 +431,13 @@ export default function App() {
   const autoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 進行中の接続を共有する(同時に呼ばれた側は同じ結果を待つ。押下の取りこぼし防止)。
   const connectPromiseRef = useRef<Promise<boolean> | null>(null);
+  // 勤務の世代番号。退勤のたびに増やす。接続処理は開始時の番号を覚えておき、
+  // 途中で変わっていたら(=接続中に退勤された)作りかけの接続を捨てる。
+  // これが無いと、再接続の最中に退勤すると、退勤後に接続が完了して
+  // 勤務中に戻ってしまう(出勤処理ではイヤホンのボタンまで再び有効になる)。
+  const shiftGenRef = useRef(0);
+  // 進行中の接続(connectPromiseRef)がどの世代で始まったか。
+  const connectGenRef = useRef(0);
   // PTT送信の意図(トークボタンを押している間true)。
   // 再接続完了時に既に離されていたら送信しない=ホットマイク(切り忘れ)防止の要。
   const txActiveRef = useRef(false);
@@ -551,10 +558,31 @@ export default function App() {
 
   const connect = useCallback((): Promise<boolean> => {
     // 進行中の接続があれば同じ結果を待つ(PTT押下とUI操作が重なっても取りこぼさない)。
-    if (connectPromiseRef.current) return connectPromiseRef.current;
+    // ただし退勤前に始まった接続は中止されるので、片付くのを待ってから改めて接続する。
+    if (connectPromiseRef.current) {
+      if (connectGenRef.current === shiftGenRef.current) return connectPromiseRef.current;
+      return connectPromiseRef.current.then(() => connect());
+    }
 
+    const gen = shiftGenRef.current;
+    connectGenRef.current = gen;
     const attempt = (async (): Promise<boolean> => {
       const startedAt = Date.now();
+      let ownRoom: Room | null = null;
+      // 接続中に退勤されたか。されていれば作りかけの接続を切って true を返す。
+      const abandoned = async (): Promise<boolean> => {
+        if (shiftGenRef.current === gen) return false;
+        logDebug("connect: 接続中に退勤されたため中止");
+        if (ownRoom) {
+          if (roomRef.current === ownRoom) roomRef.current = null;
+          try {
+            await ownRoom.disconnect();
+          } catch {
+            // noop
+          }
+        }
+        return true;
+      };
       const displayName = identityRef.current.trim();
       const room = roomIdRef.current;
       if (displayName.length === 0) {
@@ -597,8 +625,10 @@ export default function App() {
           room,
         });
         logDebug(`connect: トークン取得OK(+${Date.now() - startedAt}ms)`);
+        if (await abandoned()) return false;
 
         const lkRoom = new Room();
+        ownRoom = lkRoom;
         roomRef.current = lkRoom;
         // 一度でも接続が確立したか。確立前の失敗で自動再接続を繰り返さないために使う。
         let established = false;
@@ -658,6 +688,7 @@ export default function App() {
 
         await lkRoom.connect(data.url, data.token);
         logDebug(`connect: room.connect完了(+${Date.now() - startedAt}ms)`);
+        if (await abandoned()) return false;
         // マイクエンジンの「ウォームアップ」: setMicrophoneEnabledは初回のみ
         // createTracks()+publishTrack()という重い処理を行い、2回目以降は
         // track.mute()/unmute()という軽い処理になる(ライブラリの内部実装)。
@@ -668,6 +699,7 @@ export default function App() {
         await lkRoom.localParticipant.setMicrophoneEnabled(true);
         await lkRoom.localParticipant.setMicrophoneEnabled(false);
         logDebug("connect: マイクウォームアップ完了");
+        if (await abandoned()) return false;
         established = true;
         setConnected(true);
         setMicOn(false);
@@ -681,6 +713,8 @@ export default function App() {
         return true;
       } catch (e) {
         logDebug(`connect: エラー ${errMsg(e)}`);
+        // 退勤による中止なら、エラーは出さない(後から始まった接続も壊さない)。
+        if (await abandoned()) return false;
         await cleanup();
         showError(e, "接続に失敗しました");
         return false;
@@ -1076,8 +1110,10 @@ export default function App() {
   // 以前は「接続する」と「PTTを有効化」が別のボタンで、2つ目を押し忘れると
   // ポケットの中でイヤホンのボタンを押しても送信できなかった。
   const startShift = useCallback(async () => {
+    const gen = shiftGenRef.current;
     const ok = await connect();
-    if (!ok || !PttChannel) return;
+    // 接続中に退勤された場合は、ロック中の送信(PTT)を準備しない。
+    if (!ok || !PttChannel || shiftGenRef.current !== gen) return;
     if (pttJoinedRef.current || nativePttJoined()) {
       // 既に参加済み(復元されたチャンネルなど)。二重参加はしない。
       setPttJoined(true);
@@ -1091,7 +1127,10 @@ export default function App() {
   // そのため退勤後(通勤中に音楽を聴く時など)にイヤホンの再生ボタンを押すと、
   // 自動で再接続して診療室にマイクが開いてしまっていた。
   const endShift = useCallback(async () => {
+    // 最初に(awaitより前に)世代を進め、進行中の接続・出勤処理を中止させる。
+    shiftGenRef.current += 1;
     logDebug("退勤: 開始");
+    setError(null);
     wantConnectedRef.current = false;
     txActiveRef.current = false;
     bleTxIntentRef.current = false;
@@ -1124,7 +1163,7 @@ export default function App() {
     }
     await cleanup();
     logDebug("退勤: 完了");
-  }, [cleanup, logDebug]);
+  }, [cleanup, logDebug, setError]);
 
   // イヤホンが無い時の受信音の出力先を切り替える(設定は端末に保存)。
   // スピーカー: ポケットに入れたままでも聞こえる(既定)。
