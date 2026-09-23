@@ -12,7 +12,9 @@ export type BleButtonState =
   | "confirming"
   | "connected"
   | "disconnected"
-  | "error";
+  | "error"
+  /** 診断ログ専用(画面の案内文は更新しない) */
+  | "debug";
 
 export type BleButtonStatus = {
   registered: boolean;

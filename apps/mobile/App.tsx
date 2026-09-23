@@ -169,6 +169,8 @@ function displayNameOf(p: { name?: string; identity: string }): string {
 }
 
 const DISPLAY_NAME_MAX = 32;
+// 診断ログの保持行数。
+const DEBUG_LOG_MAX = 80;
 
 // 画面上部の状態表示の色。
 const STATUS_COLORS = {
@@ -374,7 +376,7 @@ export default function App() {
   const [speakerOn, setSpeakerOn] = useState(() => readSetting(SETTINGS_KEYS.speaker) !== "0");
   // エンジン連動の処理(再実行しない useEffect)から最新の設定を読むための ref。
   const speakerOnRef = useRef(speakerOn);
-  // Phase B: ポケット/バックグラウンド送信(PushToTalkフレームワーク)。
+  // ロック中・ポケットの中からの送信(Apple PushToTalkフレームワーク)。
   const [pttJoined, setPttJoined] = useState(false);
   const [pttBusy, setPttBusy] = useState(false);
   // BLEボタン(iTag型)の状態。ロック中でもGATT通知が届くため、押下でPTT送信をトグルする。
@@ -432,7 +434,8 @@ export default function App() {
   const [debugLog, setDebugLog] = useState<string[]>([]);
   const logDebug = useCallback((msg: string) => {
     const t = new Date().toTimeString().slice(0, 8);
-    setDebugLog((prev) => [...prev.slice(-24), `${t} ${msg}`]);
+    // 1回の送信で10行前後出るため、数回分さかのぼれるよう多めに保持する。
+    setDebugLog((prev) => [...prev.slice(-(DEBUG_LOG_MAX - 1)), `${t} ${msg}`]);
   }, []);
 
   // setupIOSAudioManagement相当を自前で実装し、各段階をlogDebugに出す。
@@ -528,8 +531,8 @@ export default function App() {
       // noop
     }
     roomRef.current = null;
-    // 音声セッションの有効化/無効化は registerGlobals の自動管理(WebRTCの録音/再生
-    // ON・OFFに追従)に一本化しているため、ここでは手動で止めない
+    // 音声セッションの有効化/無効化は、上のエンジン連動処理(WebRTCの録音/再生
+    // ON・OFFに追従)とPushToTalkに一本化しているため、ここでは手動で止めない
     // (手動でも止めると二重制御になり、PTT起動時などに活性化が失敗する原因になる)。
     setConnected(false);
     setMicOn(false);
@@ -882,7 +885,7 @@ export default function App() {
     await setMic(false);
   }, [logDebug, setMic]);
 
-  // Phase B: PushToTalkフレームワークのイベントを購読。
+  // PushToTalkフレームワークのイベントを購読。
   // システム(ロック画面/Dynamic Island)からの送信開始/停止で LiveKit のマイクをON/OFF。
   useEffect(() => {
     if (!PttChannel) return;
@@ -968,8 +971,8 @@ export default function App() {
           // 実際に失敗した場合のみ「不可」と表示する。
           logDebug(`イヤホンのボタン: Apple公式経路は使えません（${payload.error as string}）`);
         } else {
-          // 排他制御のため、こちらが意図的に無効化した場合。エラーではない。
-          logDebug("イヤホンのボタン: Apple公式経路を無効化（アプリ側で受け取るため）");
+          // 現在のアプリからは無効化していない(旧ビルドの切替機能の名残)。
+          logDebug("イヤホンのボタン: Apple公式経路が無効になりました");
         }
       }),
       PttChannel.addListener("onError", (payload) => {
@@ -1251,7 +1254,8 @@ export default function App() {
       }),
       BleButton.addListener("onStateChanged", (payload) => {
         logDebug(`BLEボタン: ${payload.state} ${payload.detail}`);
-        setBleDetail(payload.detail);
+        // 診断用の細かい通知で、登録手順の案内文を上書きしない。
+        if (payload.state !== "debug") setBleDetail(payload.detail);
         setBleStatus(BleButton?.getStatus() ?? { registered: false, connected: false });
       }),
     ];

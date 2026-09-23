@@ -2,7 +2,9 @@ import { useEffect } from "react";
 import RemotePtt from "../modules/remote-ptt";
 
 /**
- * イヤホン等のハードボタン（再生/停止）押下で onToggle を呼ぶ。
+ * キーボード型BLEリモコン（ページめくり器・シャッターリモコン等）のキー押下で onToggle を呼ぶ。
+ * 画面がONの時だけ届く（ロック中はiOSがFace IDを要求するため使えない）。
+ * イヤホンのボタンはここではなく、PushToTalk(PttChannel)が直接受け取る。
  * enabled のときだけ購読する（＝LiveKit接続中だけ有効化する想定）。
  * ネイティブモジュールが無い環境（Expo Go 等）では何もしない。
  */
