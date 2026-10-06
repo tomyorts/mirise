@@ -1706,7 +1706,7 @@ export default function App() {
 
             <Text style={styles.guideTitle}>🎧 ポケットに入れたまま話す</Text>
             <Text style={styles.hint}>
-              ・Bluetoothイヤホンのボタンを1回押すと送信開始、もう1回押すと終了。
+              ・Bluetoothイヤホンのボタンを押すと送信開始、もう一度同じ押し方で終了（押し方は機種によって違い、多くは「2回押し」）。
               {"\n"}・押し忘れても45秒で自動的に止まります。
               {"\n"}・一般的なBluetoothイヤホンで使えます（AirPodsは不可・iOS 17以降）。
               {"\n"}・機種によっては、押した時に音楽アプリも反応することがあります。
