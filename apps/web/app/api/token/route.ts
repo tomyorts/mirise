@@ -2,6 +2,7 @@ import { AccessToken, TrackSource } from "livekit-server-sdk";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { safeEqual, SESSION_COOKIE, verifySessionToken } from "@/app/lib/auth";
+import { bearerToken, verifyDeviceToken } from "@/app/lib/deviceAuth";
 import {
   DISPLAY_NAME_MAX_LENGTH,
   DISPLAY_NAME_MESSAGES,
@@ -65,18 +66,34 @@ function resolveDisplayName(raw: unknown, identity: string, strict: boolean): st
 
 export async function POST(request: NextRequest) {
   try {
-    // 認証: ログイン済みセッション、またはネイティブアプリ用のAPIキー。
-    // INTERCOM_API_KEY を設定しない場合はログインセッションのみ許可。
+    // 認証は次のいずれか:
+    // - PC画面: ログイン済みセッション(Cookie)
+    // - iPhoneアプリ: 端末トークン(Authorization: Bearer、/api/device-login で発行)
+    // - 旧iPhoneアプリ: 埋め込みの共通キー(x-intercom-key)。全端末が新しいアプリに
+    //   置き換わったら、Vercelの INTERCOM_API_KEY を削除してこの経路を閉じること。
     const authSecret = process.env.AUTH_SECRET;
+    const clinicPassword = process.env.CLINIC_PASSWORD;
     const session = authSecret
       ? await verifySessionToken(request.cookies.get(SESSION_COOKIE)?.value, authSecret)
       : null;
+    const deviceTokenValue = bearerToken(request.headers.get("authorization"));
+    const device =
+      deviceTokenValue && authSecret && clinicPassword
+        ? await verifyDeviceToken(deviceTokenValue, authSecret, clinicPassword)
+        : null;
     const intercomApiKey = process.env.INTERCOM_API_KEY;
     const headerKey = request.headers.get("x-intercom-key");
     const authedByKey = !!intercomApiKey && !!headerKey && safeEqual(headerKey, intercomApiKey);
-    if (!session && !authedByKey) {
+    const authedByApp = !!device || authedByKey;
+    if (!session && !authedByApp) {
+      // 端末トークンが無効(期限切れ・医院のパスワード変更)なら、アプリに再ログインを促す。
       return NextResponse.json(
-        { error: "認証が必要です。ログインしてください。" },
+        deviceTokenValue
+          ? {
+              error: "ログインの有効期限が切れました。医院のパスワードでもう一度ログインしてください。",
+              code: "device_token_invalid",
+            }
+          : { error: "認証が必要です。ログインしてください。" },
         { status: 401 }
       );
     }
@@ -93,7 +110,7 @@ export async function POST(request: NextRequest) {
     const parsed = tokenRequestSchema.parse(body);
     const { identity, room } = parsed;
     // 名前を厳密に検査するのは、PC画面(ログインセッション)からのリクエストだけ。
-    const name = resolveDisplayName(parsed.name, identity, !!session && !authedByKey);
+    const name = resolveDisplayName(parsed.name, identity, !!session && !authedByApp);
 
     const apiKey = process.env.LIVEKIT_API_KEY;
     const apiSecret = process.env.LIVEKIT_API_SECRET;
