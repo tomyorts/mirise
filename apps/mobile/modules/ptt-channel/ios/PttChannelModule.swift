@@ -12,7 +12,7 @@ public class PttChannelModule: Module {
   fileprivate var managerBox: Any?      // PTChannelManager (iOS16+)
   fileprivate var managerTaskBox: Any?  // Task<PTChannelManager, Error> (iOS16+, 作成中の共有)
   fileprivate var delegateBox: Any?     // PttDelegate (iOS16+)
-  fileprivate var channelName: String = "MIRISE Intercom"
+  fileprivate var channelName: String = "MIRAI LINK"
 
   // 以下の状態は PushToTalk のデリゲート(システムのスレッド)から書かれ、
   // getState(JSのスレッド)から読まれるため、ロックで保護する。
@@ -362,7 +362,7 @@ final class PttDelegate: NSObject, PTChannelManagerDelegate, PTChannelRestoratio
     // 復帰時にUUIDも保持して、以後の送信要求(begin/end)が機能するようにする。
     module?.channelUUID = channelUUID
     return PTChannelDescriptor(
-      name: module?.channelName ?? "MIRISE Intercom",
+      name: module?.channelName ?? "MIRAI LINK",
       image: PttChannelModule.makeChannelImage()
     )
   }

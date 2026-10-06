@@ -81,7 +81,7 @@ public class RemotePttModule: Module {
       let center = MPRemoteCommandCenter.shared()
       // 最小のNow Playing情報（これが無いとボタンが届かない）
       MPNowPlayingInfoCenter.default().nowPlayingInfo = [
-        MPMediaItemPropertyTitle: "MIRISE Intercom"
+        MPMediaItemPropertyTitle: "MIRAI LINK"
       ]
       let handler: (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus = { [weak self] _ in
         self?.sendEvent("onToggle", [:])

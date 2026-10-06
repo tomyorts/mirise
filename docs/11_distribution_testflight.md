@@ -49,7 +49,7 @@ eas build --platform ios --profile production
 
 > もし「Push to Talk の機能が無い」というエラーが出たら、
 > developer.apple.com → Certificates, IDs & Profiles → Identifiers →
-> `jp.co.medident.miriseintercom` を開き、**Push to Talk** にチェックを入れて保存してから、もう一度ビルドしてください。
+> `jp.co.medident.mirailink` を開き、**Push to Talk** にチェックを入れて保存してから、もう一度ビルドしてください。
 
 ---
 
@@ -59,7 +59,7 @@ eas build --platform ios --profile production
 eas submit --platform ios --latest
 ```
 
-- 初回は App Store Connect にアプリの登録を自動で作ります（アプリ名: MIRISE Intercom）
+- 初回は App Store Connect にアプリの登録を自動で作ります（アプリ名: MIRAI LINK）
 - 送信後、Apple側の処理に10〜30分ほどかかります
 
 ---
@@ -77,7 +77,7 @@ App Store Connect（https://appstoreconnect.apple.com）→ アプリ → **Test
 **スタッフ側の手順**
 1. App Storeで **TestFlight** アプリを入れる
 2. 送られた公開リンクを開く →「インストール」
-3. MIRISE Intercom を開き、医院のパスワードを入力 → 名前とルームを入れて「出勤する」
+3. MIRAI LINK を開き、医院のパスワードを入力 → 名前とルームを入れて「出勤する」
 
 > TestFlightのビルドは **90日で期限切れ** になります。期限前に手順2〜3で新しいビルドを送れば、
 > スタッフのアプリは自動で更新されます。長期運用では App Store 公開（または非公開配布）に切り替えます。

@@ -1253,7 +1253,7 @@ export default function App() {
     setPttBusy(true);
     try {
       logDebug("PTT参加: リクエスト開始");
-      await PttChannel.join("MIRISE Intercom");
+      await PttChannel.join("MIRAI LINK");
       // JSだけリロードされた直後などは、ネイティブ側は既に参加済みで
       // didJoinChannel(onJoinイベント)が再度発火しないことがある。
       // join()のリクエスト自体が成功した時点で画面も確実に更新する。
@@ -1706,7 +1706,7 @@ export default function App() {
     <SafeAreaView style={styles.safe}>
       <StatusBar style="dark" />
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        <Text style={styles.brand}>MIRISE WELLMEDICAL GROUP</Text>
+        <Text style={styles.brand}>MIRAI LINK</Text>
         <Text style={styles.title}>院内音声インカム</Text>
 
         {micOn ? (
@@ -1888,7 +1888,7 @@ export default function App() {
               {"\n"}・押し忘れても45秒で自動的に止まります。
               {"\n"}・一般的なBluetoothイヤホンで使えます（AirPodsは不可・iOS 17以降）。
               {"\n"}・機種によっては、押した時に音楽アプリも反応することがあります。
-              {"\n"}・イヤホンが無い時は、画面上部やロック画面の「MIRISE Intercom」表示を開き、トークボタンを押している間だけ話せます。
+              {"\n"}・イヤホンが無い時は、画面上部やロック画面の「MIRAI LINK」表示を開き、トークボタンを押している間だけ話せます。
               {"\n"}・受信音はイヤホン接続中はイヤホンから流れます（周囲には聞こえません）。
               {"\n"}・うまく送れない時は「退勤する」→「出勤する」で直ります。
             </Text>
