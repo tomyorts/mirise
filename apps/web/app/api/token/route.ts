@@ -1,41 +1,116 @@
-import { AccessToken } from "livekit-server-sdk";
+import { AccessToken, TrackSource } from "livekit-server-sdk";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { safeEqual, SESSION_COOKIE, verifySessionToken } from "@/app/lib/auth";
+import { bearerToken, verifyDeviceToken } from "@/app/lib/deviceAuth";
+import {
+  DISPLAY_NAME_MAX_LENGTH,
+  DISPLAY_NAME_MESSAGES,
+  DISPLAY_NAME_PATTERN,
+  sanitizeDisplayName,
+} from "@/app/lib/staffIdentity";
 
-const tokenRequestSchema = z.object({
-  identity: z
-    .string()
-    .min(2, "スタッフ名は2文字以上で入力してください")
-    .max(64, "スタッフ名は64文字以内で入力してください")
-    .regex(/^[\p{L}\p{N}_\-. ]+$/u, "スタッフ名に使用できない文字が含まれています"),
-  room: z
-    .string()
-    .min(2)
-    .max(64)
-    .regex(/^[a-zA-Z0-9_-]+$/, "ルーム名が不正です"),
-});
+// 表示名(画面に出る名前)。日本語名を想定して緩めに受け付ける。
+// 全角スペース・「・」・1文字の姓(林・森など)もOK。規則はクライアントと共通(app/lib/staffIdentity.ts)。
+const displayNameSchema = z
+  .string({ invalid_type_error: "スタッフ名の形式が正しくありません" })
+  .trim()
+  .min(1, DISPLAY_NAME_MESSAGES.required)
+  .max(DISPLAY_NAME_MAX_LENGTH, DISPLAY_NAME_MESSAGES.tooLong)
+  .regex(DISPLAY_NAME_PATTERN, DISPLAY_NAME_MESSAGES.invalidChars);
+
+const tokenRequestSchema = z.object(
+  {
+    // identity は端末ごとに一意な内部ID(例: 佐藤-a1b2c3)。従来どおり厳密にチェックする。
+    identity: z
+      .string({
+        required_error: "スタッフ名を入力してください",
+        invalid_type_error: "スタッフ名の形式が正しくありません",
+      })
+      .min(2, "スタッフ名は2文字以上で入力してください")
+      .max(64, "スタッフ名は64文字以内で入力してください")
+      .regex(/^[\p{L}\p{N}_\-. ]+$/u, "スタッフ名に使用できない文字が含まれています"),
+    // name は省略可(旧バージョンのアプリは送らない)。中身の検査は resolveDisplayName で行う。
+    name: z.unknown().optional(),
+    room: z
+      .string({
+        required_error: "ルームを選択してください",
+        invalid_type_error: "ルーム名が不正です",
+      })
+      .min(2, "ルーム名が不正です")
+      .max(64, "ルーム名が不正です")
+      .regex(/^[a-zA-Z0-9_-]+$/, "ルーム名が不正です"),
+  },
+  {
+    required_error: "リクエストの形式が正しくありません",
+    invalid_type_error: "リクエストの形式が正しくありません",
+  }
+);
+
+/**
+ * 表示名を決める。省略・空文字なら identity を使う。
+ * - PC画面(ログインセッション): 画面側と同じ規則で厳密に検査し、合わなければ 400。
+ * - iPhoneアプリ(APIキー): 名前の文字種を確かめない旧バージョンのアプリがまだ使われているため、
+ *   拒否はせず、使えない文字を除いた名前(それも無理なら identity)で接続させる。
+ *   例: 「佐藤(DH)」→「佐藤DH」。規則を確かめる新しいアプリが行き渡ったら厳密にしてよい。
+ */
+function resolveDisplayName(raw: unknown, identity: string, strict: boolean): string {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) {
+    return identity;
+  }
+  if (strict) return displayNameSchema.parse(raw);
+  const result = displayNameSchema.safeParse(raw);
+  if (result.success) return result.data;
+  return (typeof raw === "string" ? sanitizeDisplayName(raw) : null) ?? identity;
+}
 
 export async function POST(request: NextRequest) {
   try {
-    // 認証: ログイン済みセッション、またはネイティブアプリ用のAPIキー。
-    // INTERCOM_API_KEY を設定しない場合はログインセッションのみ許可。
+    // 認証は次のいずれか:
+    // - PC画面: ログイン済みセッション(Cookie)
+    // - iPhoneアプリ: 端末トークン(Authorization: Bearer、/api/device-login で発行)
+    // - 旧iPhoneアプリ: 埋め込みの共通キー(x-intercom-key)。全端末が新しいアプリに
+    //   置き換わったら、Vercelの INTERCOM_API_KEY を削除してこの経路を閉じること。
     const authSecret = process.env.AUTH_SECRET;
+    const clinicPassword = process.env.CLINIC_PASSWORD;
     const session = authSecret
       ? await verifySessionToken(request.cookies.get(SESSION_COOKIE)?.value, authSecret)
       : null;
+    const deviceTokenValue = bearerToken(request.headers.get("authorization"));
+    const device =
+      deviceTokenValue && authSecret && clinicPassword
+        ? await verifyDeviceToken(deviceTokenValue, authSecret, clinicPassword)
+        : null;
     const intercomApiKey = process.env.INTERCOM_API_KEY;
     const headerKey = request.headers.get("x-intercom-key");
     const authedByKey = !!intercomApiKey && !!headerKey && safeEqual(headerKey, intercomApiKey);
-    if (!session && !authedByKey) {
+    const authedByApp = !!device || authedByKey;
+    if (!session && !authedByApp) {
+      // 端末トークンが無効(期限切れ・医院のパスワード変更)なら、アプリに再ログインを促す。
       return NextResponse.json(
-        { error: "認証が必要です。ログインしてください。" },
+        deviceTokenValue
+          ? {
+              error: "ログインの有効期限が切れました。医院のパスワードでもう一度ログインしてください。",
+              code: "device_token_invalid",
+            }
+          : { error: "認証が必要です。ログインしてください。" },
         { status: 401 }
       );
     }
 
-    const body = await request.json();
-    const { identity, room } = tokenRequestSchema.parse(body);
+    // 本文がJSONとして読めない場合は 400(サーバーエラー扱いにしない)。
+    const body: unknown = await request.json().catch(() => undefined);
+    if (body === undefined || body === null || typeof body !== "object" || Array.isArray(body)) {
+      return NextResponse.json(
+        { error: "リクエストの形式が正しくありません" },
+        { status: 400 }
+      );
+    }
+
+    const parsed = tokenRequestSchema.parse(body);
+    const { identity, room } = parsed;
+    // 名前を厳密に検査するのは、PC画面(ログインセッション)からのリクエストだけ。
+    const name = resolveDisplayName(parsed.name, identity, !!session && !authedByApp);
 
     const apiKey = process.env.LIVEKIT_API_KEY;
     const apiSecret = process.env.LIVEKIT_API_SECRET;
@@ -50,7 +125,7 @@ export async function POST(request: NextRequest) {
 
     const token = new AccessToken(apiKey, apiSecret, {
       identity,
-      name: identity,
+      name,
       ttl: "8h",
     });
 
@@ -58,6 +133,8 @@ export async function POST(request: NextRequest) {
       room,
       roomJoin: true,
       canPublish: true,
+      // 音声インカムなので、送信できるのはマイク音声だけに限定する(カメラ・画面共有は不可)。
+      canPublishSources: [TrackSource.MICROPHONE],
       canSubscribe: true,
       canPublishData: true,
     });
@@ -67,6 +144,7 @@ export async function POST(request: NextRequest) {
       url: livekitUrl,
       room,
       identity,
+      name,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

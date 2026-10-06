@@ -2,7 +2,7 @@
 
 ## プロダクト名
 
-MIRISE Intercom
+MIRAI LINK
 
 ## 対象ユーザー
 

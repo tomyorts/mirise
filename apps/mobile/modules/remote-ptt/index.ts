@@ -4,14 +4,16 @@ import { requireOptionalNativeModule, type EventSubscription } from "expo-module
 // Expo Go や未ビルド環境では存在しないため requireOptional で「無ければ null」にする
 // （import 時点でアプリごとクラッシュするのを防ぐ）。
 export type RemotePttModuleType = {
-  /** リモートコマンド(イヤホンの再生/停止ボタン)の購読を開始 */
+  /** どのネイティブビルドが入っているかを判別するタグ */
+  buildTag?: string;
+  /** キーボード型BLEリモコン(ページめくり器・シャッター等)のキー入力の購読を開始 */
   start(): void;
   /** 購読を停止 */
   stop(): void;
   /** onToggle イベントの購読 */
   addListener(
     eventName: "onToggle",
-    listener: (payload: Record<string, never>) => void,
+    listener: (payload: { source?: string }) => void,
   ): EventSubscription;
 };
 

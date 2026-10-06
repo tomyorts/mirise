@@ -1,21 +1,26 @@
 {
   "expo": {
-    "name": "MIRISE Intercom",
-    "slug": "mirise-intercom",
+    "name": "MIRAI LINK",
+    "slug": "mirai-link",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "jp.co.medident.miriseintercom",
+      "bundleIdentifier": "jp.co.medident.mirailink",
+      "entitlements": {
+        "com.apple.developer.push-to-talk": true,
+        "aps-environment": "development"
+      },
       "infoPlist": {
         "NSMicrophoneUsageDescription": "院内インカムで通話するためにマイクを使用します。",
-        "UIBackgroundModes": ["audio"]
+        "NSBluetoothAlwaysUsageDescription": "BLEリモコン（ボタン）で送信を開始/停止するためにBluetoothを使用します。",
+        "UIBackgroundModes": ["audio", "push-to-talk", "bluetooth-central"]
       }
     },
     "android": {
-      "package": "jp.co.medident.miriseintercom",
+      "package": "jp.co.medident.mirailink",
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS"

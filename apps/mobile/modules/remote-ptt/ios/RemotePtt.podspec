@@ -1,8 +1,8 @@
 Pod::Spec.new do |s|
   s.name           = 'RemotePtt'
   s.version        = '1.0.0'
-  s.summary        = 'Bluetooth remote command (play/pause) to PTT toggle bridge'
-  s.description     = 'Small Expo module that forwards MPRemoteCommandCenter events to JS.'
+  s.summary        = 'Keyboard-type BLE remote (page turner / shutter) to PTT toggle bridge'
+  s.description     = 'Small Expo module that forwards GameController keyboard presses to JS (screen-on only).'
   s.author         = ''
   s.homepage       = 'https://github.com/tomyorts/mirise'
   s.platforms      = { :ios => '15.1' }

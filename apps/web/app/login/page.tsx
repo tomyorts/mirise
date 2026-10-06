@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { LoginForm } from "./LoginForm";
 
 export const metadata: Metadata = {
-  title: "ログイン | MIRISE Intercom",
+  title: "ログイン | MIRAI LINK",
 };
 
 export default function LoginPage() {

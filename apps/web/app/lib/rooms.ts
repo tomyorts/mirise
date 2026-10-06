@@ -4,6 +4,9 @@ export type IntercomRoom = {
   description: string;
 };
 
+// 緊急呼び出しに使う「全体」ルームのID。iPhoneアプリにも固定で組み込まれているため変更・削除しない。
+export const BROADCAST_ROOM_ID = "all";
+
 export const INTERCOM_ROOMS: IntercomRoom[] = [
   { id: "front", label: "受付", description: "受付・会計・予約確認" },
   { id: "clinic", label: "診療室", description: "診療中の通常連携" },
