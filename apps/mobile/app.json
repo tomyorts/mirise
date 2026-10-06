@@ -17,7 +17,11 @@
       "infoPlist": {
         "NSMicrophoneUsageDescription": "院内インカムで通話するためにマイクを使用します。",
         "NSBluetoothAlwaysUsageDescription": "BLEリモコン（ボタン）で送信を開始/停止するためにBluetoothを使用します。",
-        "UIBackgroundModes": ["audio", "push-to-talk", "bluetooth-central"]
+        "UIBackgroundModes": [
+          "audio",
+          "push-to-talk",
+          "bluetooth-central"
+        ]
       }
     },
     "android": {
@@ -40,6 +44,12 @@
     "plugins": [
       "@livekit/react-native-expo-plugin",
       "@config-plugins/react-native-webrtc"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "656799af-e44c-4ace-9dd0-31f173a1be08"
+      }
+    },
+    "owner": "tomyorts"
   }
 }
