@@ -64,11 +64,97 @@ if (Platform.OS === "ios") {
 }
 
 // Web版と同じトークン発行APIを再利用する(Vercelに公開済み)。
-const TOKEN_ENDPOINT = "https://mirisevoicelink.vercel.app/api/token";
+const API_BASE = "https://mirisevoicelink.vercel.app";
+const TOKEN_ENDPOINT = `${API_BASE}/api/token`;
+const DEVICE_LOGIN_ENDPOINT = `${API_BASE}/api/device-login`;
 
-// ネイティブアプリ用のAPIキー(合言葉)。ビルド時に EXPO_PUBLIC_INTERCOM_KEY から埋め込む。
-// Vercel 側の INTERCOM_API_KEY と同じ値にすること。
+// 旧方式のAPIキー(合言葉)。開発ビルドでのみ使う(EXPO_PUBLIC_INTERCOM_KEY を設定した時だけ)。
+// スタッフに配るビルドには設定しないこと: アプリから取り出せるため、院外に渡ると
+// 誰でもサーバーを使えてしまう。配布ビルドでは下の「端末トークン」を使う。
 const INTERCOM_KEY = process.env.EXPO_PUBLIC_INTERCOM_KEY;
+
+// ---- 端末トークン(医院のパスワードで1回ログインすると発行される、この端末専用の鍵) ----
+// iOSのキーチェーンに保存する。保存の仕方は「再起動後に一度ロック解除すれば、以降は
+// ロック中でも読める」(AFTER_FIRST_UNLOCK)。ロック中にイヤホンのボタンでアプリが
+// 裏で起動された時にも読めないと、再接続できないため。バックアップで別の端末に
+// 移らないよう THIS_DEVICE_ONLY にする。
+// expo-secure-store は新しいネイティブビルドにしか無いため、無い時に読み込みで
+// アプリごと落ちないよう、存在を確かめてから使う。
+type SecureStoreModule = typeof import("expo-secure-store");
+let SecureStore: SecureStoreModule | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  SecureStore = require("expo-secure-store") as SecureStoreModule;
+} catch {
+  SecureStore = null;
+}
+const DEVICE_TOKEN_KEY = "mirise.deviceToken";
+
+let deviceTokenCache: string | null = null;
+let deviceTokenLoad: Promise<string | null> | null = null;
+
+function loadDeviceToken(): Promise<string | null> {
+  if (!deviceTokenLoad) {
+    deviceTokenLoad = (async () => {
+      if (!SecureStore) return null;
+      try {
+        deviceTokenCache = await SecureStore.getItemAsync(DEVICE_TOKEN_KEY);
+      } catch {
+        deviceTokenCache = null;
+      }
+      return deviceTokenCache;
+    })();
+  }
+  return deviceTokenLoad;
+}
+
+async function saveDeviceToken(token: string | null): Promise<void> {
+  deviceTokenCache = token;
+  deviceTokenLoad = Promise.resolve(token);
+  if (!SecureStore) return;
+  try {
+    if (token) {
+      await SecureStore.setItemAsync(DEVICE_TOKEN_KEY, token, {
+        keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
+      });
+    } else {
+      await SecureStore.deleteItemAsync(DEVICE_TOKEN_KEY);
+    }
+  } catch {
+    // 保存に失敗しても、このアプリの起動中はメモリ上のトークンで動く
+  }
+}
+
+// 医院のパスワードで端末をログインさせ、端末トークンを保存する。
+async function deviceLogin(password: string): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TOKEN_TIMEOUT_MS);
+  try {
+    const response = await fetch(DEVICE_LOGIN_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+      signal: controller.signal,
+    });
+    let data: { token?: string; error?: string } = {};
+    try {
+      data = (await response.json()) as typeof data;
+    } catch {
+      // HTMLのエラーページなど
+    }
+    if (!response.ok || !data.token) {
+      const err = new Error(
+        data.error ?? `ログインに失敗しました(HTTP ${response.status})`,
+      ) as Error & { status?: number };
+      // パスワード違い(401)は「接続キー不一致」と言い換えられないよう 400 扱いで本文を出す。
+      err.status = response.status === 401 ? 400 : response.status;
+      throw err;
+    }
+    await saveDeviceToken(data.token);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const ROOMS = [
   { id: "front", label: "受付" },
@@ -246,6 +332,12 @@ function toFriendlyError(e: unknown, fallback: string): AppError {
         "サーバーから応答がありません。電波の弱い場所か、Wi-Fiがインターネットに繋がっていない可能性があります。場所を変えてもう一度お試しください",
     };
   }
+  const code = (e && typeof e === "object" ? (e as { code?: unknown }).code : undefined);
+  if (code === "device_token_invalid") {
+    return {
+      message: "ログインの有効期限が切れました。医院のパスワードでもう一度ログインしてください",
+    };
+  }
   if (status === 401) {
     return {
       message: "接続キーが一致しません。アプリが古い可能性があります。管理者に確認してください",
@@ -298,7 +390,9 @@ async function fetchToken(body: {
   room: string;
 }): Promise<{ token: string; url: string }> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (INTERCOM_KEY) headers["x-intercom-key"] = INTERCOM_KEY;
+  const deviceToken = await loadDeviceToken();
+  if (deviceToken) headers.Authorization = `Bearer ${deviceToken}`;
+  else if (INTERCOM_KEY) headers["x-intercom-key"] = INTERCOM_KEY;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TOKEN_TIMEOUT_MS);
   try {
@@ -309,7 +403,7 @@ async function fetchToken(body: {
       signal: controller.signal,
     });
     const text = await response.text();
-    let data: { token?: string; url?: string; error?: string } = {};
+    let data: { token?: string; url?: string; error?: string; code?: string } = {};
     try {
       data = JSON.parse(text) as typeof data;
     } catch {
@@ -318,8 +412,11 @@ async function fetchToken(body: {
     if (!response.ok || !data.token || !data.url) {
       const err = new Error(
         data.error ?? `トークン取得に失敗しました(HTTP ${response.status})`,
-      ) as Error & { status?: number };
+      ) as Error & { status?: number; code?: string };
       err.status = response.status;
+      err.code = data.code;
+      // 端末トークンが無効(期限切れ・医院のパスワード変更)。消して再ログインを促す。
+      if (data.code === "device_token_invalid") await saveDeviceToken(null);
       throw err;
     }
     return { token: data.token, url: data.url };
@@ -442,6 +539,12 @@ export default function App() {
   // 勤務中か(wantConnectedRef と同じ意味の表示用)。PTT未参加のまま通信が途切れた時にも
   // 「勤務外」と表示せず、退勤ボタンを出し続けるために使う。
   const [shiftOn, setShiftOn] = useState(false);
+  // 端末ログインの状態。"needLogin" の間は医院のパスワード入力画面を出す。
+  // (開発ビルドで旧方式のキーが埋め込まれている場合は、ログイン無しで使える)
+  const [authState, setAuthState] = useState<"loading" | "needLogin" | "ok">("loading");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [hasDeviceToken, setHasDeviceToken] = useState(false);
   // トグル判定を最新値で行うための参照 + 自動OFFタイマー。
   const micOnRef = useRef(false);
   const autoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -750,6 +853,10 @@ export default function App() {
         if (await abandoned()) return false;
         await cleanup();
         showError(e, "接続に失敗しました");
+        if ((e as { code?: unknown } | null)?.code === "device_token_invalid") {
+          setHasDeviceToken(false);
+          if (!INTERCOM_KEY) setAuthState("needLogin");
+        }
         return false;
       } finally {
         setConnecting(false);
@@ -1516,6 +1623,48 @@ export default function App() {
     };
   }, [cleanup]);
 
+  // 起動時に、保存済みの端末トークンがあるか確かめる。
+  useEffect(() => {
+    let alive = true;
+    void loadDeviceToken().then((token) => {
+      if (!alive) return;
+      setHasDeviceToken(!!token);
+      setAuthState(token || INTERCOM_KEY ? "ok" : "needLogin");
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const submitLogin = async () => {
+    const password = loginPassword;
+    if (!password) {
+      setError("医院のパスワードを入力してください");
+      return;
+    }
+    setLoginBusy(true);
+    setError(null);
+    try {
+      await deviceLogin(password);
+      logDebug("端末ログイン: 成功");
+      setLoginPassword("");
+      setHasDeviceToken(true);
+      setAuthState("ok");
+    } catch (e) {
+      logDebug(`端末ログイン: 失敗 ${errMsg(e)}`);
+      showError(e, "ログインできませんでした");
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
+  const logoutDevice = async () => {
+    await saveDeviceToken(null);
+    setHasDeviceToken(false);
+    logDebug("端末ログイン: 解除");
+    if (!INTERCOM_KEY) setAuthState("needLogin");
+  };
+
   const onShift = shiftOn || connected || pttJoined;
   // 勤務中なのに名前が保存されていない(名前を保存する前の版から更新した直後に、
   // iOSがチャンネルを復元した場合など)。入力欄を隠すと先に進めなくなるので、その時は出す。
@@ -1582,6 +1731,35 @@ export default function App() {
           </View>
         ) : null}
 
+        {authState === "needLogin" ? (
+          <View style={styles.card}>
+            <Text style={styles.guideTitle}>はじめに：この端末を登録します</Text>
+            <Text style={styles.hint}>
+              医院の共通パスワード（PC版のログインと同じもの）を入力してください。
+              一度登録すると、この端末では約半年間そのまま使えます。
+            </Text>
+            <TextInput
+              style={[styles.input, { marginTop: 14 }]}
+              value={loginPassword}
+              onChangeText={setLoginPassword}
+              placeholder="医院のパスワード"
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              editable={!loginBusy}
+              returnKeyType="done"
+              onSubmitEditing={() => void submitLogin()}
+            />
+            <Pressable
+              style={[styles.primary, loginBusy && styles.disabled]}
+              onPress={() => void submitLogin()}
+              disabled={loginBusy}
+            >
+              <Text style={styles.primaryText}>{loginBusy ? "確認中..." : "登録する"}</Text>
+            </Pressable>
+          </View>
+        ) : authState === "loading" ? null : (
+        <>
         <View style={styles.card}>
           <View style={styles.statusRow}>
             <View style={[styles.statusDot, { backgroundColor: STATUS_COLORS[statusView.tone] }]} />
@@ -1719,6 +1897,8 @@ export default function App() {
             </Text>
           </View>
         ) : null}
+        </>
+        )}
 
         <Pressable style={styles.advancedHeader} onPress={() => setAdvancedOpen((v) => !v)}>
           <Text style={styles.advancedHeaderText}>
@@ -1735,6 +1915,11 @@ export default function App() {
               {"\n"}ビルド: {RemotePtt?.buildTag ?? "旧ビルド"} / iOS {String(Platform.Version)}
               {"\n"}端末ID: {getDeviceTag()}
             </Text>
+            {hasDeviceToken && !onShift ? (
+              <Pressable style={styles.secondary} onPress={() => void logoutDevice()}>
+                <Text style={styles.secondaryText}>この端末の登録を解除する</Text>
+              </Pressable>
+            ) : null}
 
             {PttChannel && connected ? (
               pttJoined ? (
