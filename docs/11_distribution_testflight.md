@@ -100,3 +100,23 @@ App Store Connect（https://appstoreconnect.apple.com）→ アプリ → **Test
 ## 6. 全員が新しいアプリになったら
 
 旧方式の共通キーを無効にします。Vercel の環境変数 **INTERCOM_API_KEY を削除** して再デプロイしてください。
+
+---
+
+## Android版（APK を直接配る・審査なし）
+
+Android は Google Play を通さず、ビルドしたアプリ（APK）をリンクで配れます（試験運用向け）。
+
+```
+cd mirise/apps/mobile
+npx eas-cli@latest build --platform android --profile preview
+```
+
+- 初回は「Android のキーストア（署名鍵）を作るか」と聞かれる → **Yes**（Expo が保管）
+- 20〜30分で完了し、ダウンロード用のリンクと QR コードが表示される
+- スタッフは Android でリンクを開き、APK をダウンロード → インストール
+  （「提供元不明のアプリ」の許可を求められたら、Chrome などに許可する）
+- アプリを開き、医院のパスワードで端末登録 → 名前・ルーム → 「出勤する」
+- 出勤中は通知欄に「MIRAI LINK 勤務中」が出て、画面ロック中もイヤホンのボタンで話せる
+
+長期運用では Google Play（開発者登録 25ドル・1回のみ）の「内部テスト」に切り替えると、自動更新できるようになります。

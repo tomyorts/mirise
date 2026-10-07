@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AppState,
   Linking,
+  PermissionsAndroid,
   Platform,
   Pressable,
   SafeAreaView,
@@ -14,6 +15,7 @@ import {
   View,
 } from "react-native";
 import {
+  AndroidAudioTypePresets,
   AudioSession,
   registerGlobals,
   type AppleAudioCategoryOption,
@@ -28,6 +30,7 @@ import { useRemotePtt } from "./hooks/useRemotePtt";
 import BleButton, { type BleButtonStatus } from "./modules/ble-button";
 import PttChannel, { PTT_SOURCE, type PttErrorKind } from "./modules/ptt-channel";
 import RemotePtt from "./modules/remote-ptt";
+import AndroidPtt from "./modules/android-ptt";
 
 // 止め忘れ防止: トグルでONにしたら一定時間で自動OFF(ミリ秒)。
 const AUTO_OFF_MS = 30_000;
@@ -179,20 +182,27 @@ const SETTINGS_KEYS = {
   clockedOut: "mirise.clockedOut",
 } as const;
 
+// Android には Settings が無いため、端末内の安全な保存領域(expo-secure-store の
+// 同期API)を使う。どちらも同期で読めるので、起動直後の最初の描画に間に合う。
 function readSetting(key: string): string | null {
-  if (Platform.OS !== "ios") return null;
   try {
-    const value = Settings.get(key);
-    return typeof value === "string" ? value : null;
+    if (Platform.OS === "ios") {
+      const value = Settings.get(key);
+      return typeof value === "string" ? value : null;
+    }
+    return SecureStore?.getItem(key) ?? null;
   } catch {
     return null;
   }
 }
 
 function writeSettings(values: Record<string, string>) {
-  if (Platform.OS !== "ios") return;
   try {
-    Settings.set(values);
+    if (Platform.OS === "ios") {
+      Settings.set(values);
+      return;
+    }
+    for (const [key, value] of Object.entries(values)) SecureStore?.setItem(key, value);
   } catch {
     // 保存できなくても動作は続ける(次回の起動時に再入力になるだけ)。
   }
@@ -539,6 +549,10 @@ export default function App() {
   // 勤務中か(wantConnectedRef と同じ意味の表示用)。PTT未参加のまま通信が途切れた時にも
   // 「勤務外」と表示せず、退勤ボタンを出し続けるために使う。
   const [shiftOn, setShiftOn] = useState(false);
+  // Android: 勤務中サービス(ロック中もイヤホンのボタンを受け取る常駐)が動いているか。
+  const [androidButtonReady, setAndroidButtonReady] = useState(
+    () => AndroidPtt?.isRunning() ?? false,
+  );
   // 端末ログインの状態。"needLogin" の間は医院のパスワード入力画面を出す。
   // (開発ビルドで旧方式のキーが埋め込まれている場合は、ログイン無しで使える)
   const [authState, setAuthState] = useState<"loading" | "needLogin" | "ok">("loading");
@@ -586,6 +600,8 @@ export default function App() {
   // 有効化/無効化を行わないと、setMicrophoneEnabled自体は成功したように
   // 見えても実際には録音エンジンが起動しない。
   useEffect(() => {
+    // iPhone専用(Android は下の connect() で LiveKit の音声セッションを直接開始する)。
+    if (Platform.OS !== "ios") return;
     let audioEngineState = { isPlayoutEnabled: false, isRecordingEnabled: false };
 
     const handleEngineStateUpdate = async (newState: {
@@ -743,7 +759,23 @@ export default function App() {
         // 患者の前で静かにしたい場合は画面の「受話口(静音)」ボタンで切り替える。
         // これは有効化(activate)ではなく経路の好み設定のみなので、自動管理と競合しない。
         try {
-          await AudioSession.configureAudio({ ios: { defaultOutput: "speaker" } });
+          if (Platform.OS === "android") {
+            // Android: 通話用の設定で音声セッションを開始する。出力はイヤホン
+            // (Bluetooth・有線)を優先し、無い時はスピーカー(または受話口)。
+            await AudioSession.configureAudio({
+              android: {
+                preferredOutputList: [
+                  "bluetooth",
+                  "headset",
+                  speakerOnRef.current ? "speaker" : "earpiece",
+                ],
+                audioTypeOptions: AndroidAudioTypePresets.communication,
+              },
+            });
+            await AudioSession.startAudioSession();
+          } else {
+            await AudioSession.configureAudio({ ios: { defaultOutput: "speaker" } });
+          }
         } catch (audioConfigError) {
           console.warn("audio route config skipped", audioConfigError);
         }
@@ -958,7 +990,7 @@ export default function App() {
   );
 
   // タップ/ハードボタン用トグル: ONにしたら AUTO_OFF_MS で自動OFF。
-  const toggleMic = useCallback(() => {
+  const toggleMic = useCallback((autoOffMs: number = AUTO_OFF_MS) => {
     const next = !micOnRef.current;
     // 意図をすぐ記録する。micOnRef は送信の切替が終わってから更新されるため、
     // その間の2度目の押下が「停止」でなく「再開始」になってしまうのを防ぐ。
@@ -968,7 +1000,7 @@ export default function App() {
     if (next) {
       autoOffRef.current = setTimeout(() => {
         void setMic(false);
-      }, AUTO_OFF_MS);
+      }, autoOffMs);
     }
   }, [setMic, clearAutoOff]);
 
@@ -1303,6 +1335,31 @@ export default function App() {
   // 出勤: 接続してから、ロック中の送信(PTTチャンネル)も自動で準備する。
   // 以前は「接続する」と「PTTを有効化」が別のボタンで、2つ目を押し忘れると
   // ポケットの中でイヤホンのボタンを押しても送信できなかった。
+  // Android: 勤務中サービスを開始する(出勤時、画面が前面にある時だけ開始できる)。
+  // 通知(Android 13+)と Bluetooth(Android 12+、イヤホンの音声経路に必要)の許可も求める。
+  const startAndroidService = useCallback(async () => {
+    if (Platform.OS !== "android" || !AndroidPtt) return;
+    const level = typeof Platform.Version === "number" ? Platform.Version : 0;
+    try {
+      if (level >= 33) {
+        await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+      }
+      if (level >= 31) {
+        await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
+      }
+    } catch (e) {
+      logDebug(`Android: 許可の確認に失敗 ${errMsg(e)}`);
+    }
+    try {
+      AndroidPtt.start("MIRAI LINK");
+      setAndroidButtonReady(true);
+      logDebug("Android: 勤務中サービスを開始(イヤホンのボタンを受け取ります)");
+    } catch (e) {
+      logDebug(`Android: 勤務中サービスを開始できません ${errMsg(e)}`);
+      setError("ロック中にイヤホンで話す準備ができませんでした。「退勤する」→「出勤する」を試してください");
+    }
+  }, [logDebug, setError]);
+
   const startShift = useCallback(async () => {
     clockedOutRef.current = false;
     setClockedOut(false);
@@ -1310,14 +1367,19 @@ export default function App() {
     const gen = shiftGenRef.current;
     const ok = await connect();
     // 接続中に退勤された場合は、ロック中の送信(PTT)を準備しない。
-    if (!ok || !PttChannel || shiftGenRef.current !== gen) return;
+    if (!ok || shiftGenRef.current !== gen) return;
+    if (Platform.OS === "android") {
+      await startAndroidService();
+      return;
+    }
+    if (!PttChannel) return;
     if (pttJoinedRef.current || nativePttJoined()) {
       // 既に参加済み(復元されたチャンネルなど)。二重参加はしない。
       setPttJoined(true);
       return;
     }
     await joinPtt();
-  }, [connect, joinPtt]);
+  }, [connect, joinPtt, startAndroidService]);
 
   // 退勤: 送信を止め、PTTチャンネルから退出してから切断する。
   // 以前の「切断する」はLiveKitだけを切り、PTTチャンネルは参加したままだった。
@@ -1362,7 +1424,18 @@ export default function App() {
         }
       }
     }
+    if (AndroidPtt) {
+      try {
+        AndroidPtt.stop();
+      } catch {
+        // 動いていなければ何もしない
+      }
+      setAndroidButtonReady(false);
+    }
     await cleanup();
+    if (Platform.OS === "android") {
+      AudioSession.stopAudioSession().catch(() => {});
+    }
     logDebug("退勤: 完了");
   }, [cleanup, logDebug, setError]);
 
@@ -1380,6 +1453,11 @@ export default function App() {
     setSpeakerOn(next);
     writeSettings({ [SETTINGS_KEYS.speaker]: next ? "1" : "0" });
     logDebug(`音声出力: イヤホン無しの時は${next ? "スピーカー" : "受話口"}に設定`);
+    if (Platform.OS !== "ios") {
+      // Android は出勤(接続)時の出力先の優先順位で決まるため、次の出勤から反映される。
+      logDebug("音声出力: 次の出勤から反映されます(Android)");
+      return;
+    }
     void (async () => {
       try {
         await AudioSession.selectAudioOutput("default");
@@ -1497,6 +1575,27 @@ export default function App() {
   // 経路(PTT優先)でトグルするため、ロック中・ポケットの中でも送信できる。
   useRemotePtt(handleBlePress, connected);
 
+  // Android: イヤホンのボタン(勤務中サービスが受け取ったメディアボタン)で送信の開始/停止。
+  // 押し忘れ防止のため、iPhone と同じく45秒で自動停止する。
+  useEffect(() => {
+    if (!AndroidPtt) return;
+    const sub = AndroidPtt.addListener("onMediaButton", (payload) => {
+      const key = payload?.key ?? "?";
+      if (clockedOutRef.current) {
+        logDebug(`イヤホンのボタン(${key}): 退勤済みのため無視`);
+        return;
+      }
+      if (!connectedRef.current) {
+        logDebug(`イヤホンのボタン(${key}): 未接続のため再接続します(つながったらもう一度押してください)`);
+        if (wantConnectedRef.current && !connectPromiseRef.current) void connect();
+        return;
+      }
+      logDebug(`イヤホンのボタン(${key}): 送信の開始/停止`);
+      toggleMic(EARPHONE_AUTO_OFF_MS);
+    });
+    return () => sub.remove();
+  }, [connect, logDebug, toggleMic]);
+
   // イヤホンのボタンは常にApple公式経路(PushToTalkが直接受け取る)で扱う。
   // アプリ側でメディアボタンを横取りする方式も試したが、iOSは「音楽を再生して
   // いるアプリ」にしかメディアボタンの主導権を渡さず、通話用の音声セッションでは
@@ -1523,6 +1622,12 @@ export default function App() {
   // バックグラウンドで接続するとマイクのウォームアップが走るため行わない)。
   useEffect(() => {
     const onActive = () => {
+      if (AndroidPtt) {
+        const running = AndroidPtt.isRunning();
+        setAndroidButtonReady(running);
+        // 画面を開いた時に、音楽アプリに取られたボタンの受け取り先を取り戻す。
+        if (running) AndroidPtt.reclaim();
+      }
       if (clockedOutRef.current) {
         // 退勤済み。チャンネルが残っていれば退出をやり直し、自動再接続はしない。
         if (nativePttJoined()) {
@@ -1679,7 +1784,9 @@ export default function App() {
     ? { tone: "live", text: "送信中 — あなたの声が流れています" }
     : connected
       ? !pttJoined
-        ? { tone: "ok", text: "待機中 — 画面のボタンで話せます" }
+        ? androidButtonReady
+          ? { tone: "ok", text: "待機中 — イヤホンのボタンで話せます" }
+          : { tone: "ok", text: "待機中 — 画面のボタンで話せます" }
         : accessoryOk === false
           ? {
               tone: "warn",
@@ -1887,6 +1994,16 @@ export default function App() {
             </Pressable>
 
             <Text style={styles.guideTitle}>🎧 ポケットに入れたまま話す</Text>
+            {Platform.OS === "android" ? (
+              <Text style={styles.hint}>
+                ・Bluetoothイヤホンのボタンを押すと送信開始、もう一度押すと終了（機種によって1回押し・2回押しのどちらかで反応します）。
+                {"\n"}・押し忘れても45秒で自動的に止まります。
+                {"\n"}・通知欄に「MIRAI LINK 勤務中」が出ている間は、画面を消してポケットに入れても使えます。
+                {"\n"}・勤務中は音楽アプリを終了しておいてください（ボタンが音楽側に取られることがあります）。取られた時はこの画面を一度開くと戻ります。
+                {"\n"}・受信音はイヤホン接続中はイヤホンから流れます（周囲には聞こえません）。
+                {"\n"}・うまく送れない時は「退勤する」→「出勤する」で直ります。
+              </Text>
+            ) : (
             <Text style={styles.hint}>
               ・Bluetoothイヤホンのボタンを押すと送信開始、もう一度同じ押し方で終了（押し方は機種によって違い、多くは「2回押し」）。
               {"\n"}・押し忘れても45秒で自動的に止まります。
@@ -1896,6 +2013,7 @@ export default function App() {
               {"\n"}・受信音はイヤホン接続中はイヤホンから流れます（周囲には聞こえません）。
               {"\n"}・うまく送れない時は「退勤する」→「出勤する」で直ります。
             </Text>
+            )}
             <Text style={[styles.hint, { marginTop: 6 }]}>
               診療中は患者さんの個人情報を言わず、チェア番号やセット名で伝えてください。
             </Text>
@@ -1914,9 +2032,16 @@ export default function App() {
           <View style={styles.card}>
             <Text style={styles.cardLabel}>端末の状態</Text>
             <Text style={styles.hint}>
-              ロック中に話す機能: {PttChannel ? "対応" : "未対応（iOS16以上が必要）"}
-              {PttChannel ? `（${pttJoined ? "準備済み" : "未準備"}）` : ""}
-              {"\n"}ビルド: {RemotePtt?.buildTag ?? "旧ビルド"} / iOS {String(Platform.Version)}
+              ロック中に話す機能:{" "}
+              {Platform.OS === "android"
+                ? AndroidPtt
+                  ? `対応（${androidButtonReady ? "準備済み" : "出勤すると準備されます"}）`
+                  : "未対応（アプリの更新が必要）"
+                : PttChannel
+                  ? `対応（${pttJoined ? "準備済み" : "未準備"}）`
+                  : "未対応（iOS16以上が必要）"}
+              {"\n"}ビルド: {RemotePtt?.buildTag ?? AndroidPtt?.buildTag ?? "旧ビルド"} /{" "}
+              {Platform.OS === "android" ? "Android API" : "iOS"} {String(Platform.Version)}
               {"\n"}端末ID: {getDeviceTag()}
             </Text>
             {hasDeviceToken && !onShift ? (
