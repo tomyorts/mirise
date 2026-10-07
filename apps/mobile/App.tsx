@@ -609,7 +609,11 @@ export default function App() {
         } else if (newState.isRecordingEnabled || newState.isPlayoutEnabled) {
           logDebug("AudioEngine: setAppleAudioConfiguration開始");
           // 失敗してもthrowしない(内部で握りつぶしてログだけ残す)。
-          await applyAudioCategory(speakerOnRef.current, logDebug);
+          // PushToTalk が音声セッションを有効にしている最中(ロック中の送信)は、
+          // 実機で動作確認済みの元の設定(allowBluetooth のみ)のまま変えない。
+          // 有効なセッションのカテゴリを変えると経路の切り替えが起き、送信が
+          // 直後に終わってしまう(イヤホンの押下が音楽アプリ側に回る)ことがあるため。
+          await applyAudioCategory(speakerOnRef.current && !audioActiveRef.current, logDebug);
           if (!oldState.isPlayoutEnabled && !oldState.isRecordingEnabled) {
             logDebug("AudioEngine: startAudioSession開始");
             await AudioSession.startAudioSession();
