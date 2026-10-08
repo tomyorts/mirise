@@ -1,6 +1,7 @@
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Alert,
   AppState,
   Linking,
   PermissionsAndroid,
@@ -27,7 +28,13 @@ import {
 } from "@livekit/react-native-webrtc";
 import { ConnectionState, DisconnectReason, Room, RoomEvent, Track } from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
-import BleButton, { type BleButtonStatus } from "./modules/ble-button";
+import BleButton, {
+  type BleButtonMode,
+  type BleButtonState,
+  type BleButtonStatus,
+  type BlePressEvent,
+  type BlePressKind,
+} from "./modules/ble-button";
 import PttChannel, { PTT_SOURCE, type PttErrorKind } from "./modules/ptt-channel";
 import RemotePtt from "./modules/remote-ptt";
 import AndroidPtt from "./modules/android-ptt";
@@ -40,6 +47,28 @@ const AUTO_OFF_MS = 30_000;
 // 会話が流れ続ける事故を防ぐため、必ず上限を設ける。話し終える余裕を持たせて
 // BLEボタンより少し長めにしている。
 const EARPHONE_AUTO_OFF_MS = 45_000;
+// 物理ボタン(BLE)を「押している間だけ話す」方式で使う時の送信の上限(ミリ秒)。
+// 離した通知(0x00)が電波の途切れ等で届かないと送信が開いたままになり、
+// ネイティブ側にも押しっぱなしの上限は無いため、ここで必ず止める。
+// 押している間だけの操作なので、トグル(30秒)より長めの連絡にも足りる60秒にする。
+const HOLD_MAX_MS = 60_000;
+// 物理ボタンで送信開始を要求してから、システムの開始確定(onBeginTransmitting)を
+// 待つ上限。過ぎたら押下の記録(意図)を取り消す。残したままだと、確定が遅れて
+// 届いた時に「誰も話すつもりがないのに送信が始まる」ため(取り消し後に届いた
+// 確定は、handleBegin の「既に離されていた」判定で即終了する)。
+const BLE_BEGIN_WATCHDOG_MS = 5_000;
+// JSの購読前に届いた押下の再送を受け付ける上限(ミリ秒)。古い押下で、忘れた頃に
+// 送信が始まる事故を防ぐ。「離す」は止める方向なので、年齢に関係なく受け付ける。
+const BLE_REPLAY_MAX_AGE_MS = 3_000;
+// 登録直後(と「テスト」ボタン)の確認時間。この間の押下は画面に表示するだけで送信しない
+// (登録できたかを、実際に声を流さずに確かめられるようにする)。
+const BLE_TEST_MS = 10_000;
+// 診断ログ用の押下の種類の名前。
+const BLE_KIND_LABEL: Record<BlePressKind, string> = {
+  toggle: "押下",
+  down: "押す",
+  up: "離す",
+};
 
 // LiveKit(WebRTC)を使う前に一度だけグローバル初期化が必要。
 // autoConfigureAudioSession(既定true)は、WebRTCの録音/再生ON・OFFに合わせて
@@ -386,6 +415,56 @@ function nativePttJoined(): boolean {
   }
 }
 
+// ネイティブ側で送信中か(旧ビルドは transmitting を返さないので false)。
+// 物理ボタンの「離す」を受けた時に、止めるべき送信が残っているかの判断に使う。
+function nativePttTransmitting(): boolean {
+  try {
+    return typeof PttChannel?.getState === "function"
+      ? PttChannel.getState().transmitting === true
+      : false;
+  } catch {
+    return false;
+  }
+}
+
+// Android: ネイティブの自動OFFタイマーの予約を取り消す(旧ビルド・iPhoneでは何もしない)。
+function cancelNativeAutoOff(): void {
+  try {
+    if (typeof AndroidPtt?.cancelAutoOff === "function") AndroidPtt.cancelAutoOff();
+  } catch {
+    // 取り消せなくても、予約番号が合わない発火は JS 側で無視される。
+  }
+}
+
+// 物理ボタン(BLE)の状態。ネイティブが無い・読み出しに失敗した時は「未登録」扱い
+// (同期のネイティブ呼び出しなので、例外で画面ごと落ちないようにする)。
+const BLE_STATUS_NONE: BleButtonStatus = { registered: false, connected: false };
+function readBleStatus(): BleButtonStatus {
+  try {
+    return BleButton?.getStatus() ?? BLE_STATUS_NONE;
+  } catch {
+    return BLE_STATUS_NONE;
+  }
+}
+
+// Android: ボタンの検索に必要な許可を求める。Android 12以降は「付近のデバイス」
+// (BLUETOOTH_SCAN / BLUETOOTH_CONNECT)、11以前はBLE検索の結果を受け取るのに
+// 位置情報が必要(OSの仕様)。許可が無いとネイティブ側は登録を拒否するだけなので、
+// 先にここで求めて、断られたら「設定を開く」を案内する。
+async function ensureBleSetupPermission(): Promise<boolean> {
+  if (Platform.OS !== "android") return true;
+  const level = typeof Platform.Version === "number" ? Platform.Version : 0;
+  const perms =
+    level >= 31
+      ? [
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        ]
+      : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
+  const result = await PermissionsAndroid.requestMultiple(perms);
+  return perms.every((p) => result[p] === PermissionsAndroid.RESULTS.GRANTED);
+}
+
 // トークン取得の上限時間。院内Wi-Fiが「繋がっているのにインターネットに出られ
 // ない」状態や、Wi-Fi↔LTEの切替中は、上限が無いとiOS既定の60秒待ち続け、
 // その間のイヤホン押下がすべて「送信中なのに無音」になる。
@@ -501,11 +580,21 @@ export default function App() {
   // ロック中・ポケットの中からの送信(Apple PushToTalkフレームワーク)。
   const [pttJoined, setPttJoined] = useState(false);
   const [pttBusy, setPttBusy] = useState(false);
-  // BLEボタン(iTag型)の状態。ロック中でもGATT通知が届くため、押下でPTT送信をトグルする。
-  const [bleStatus, setBleStatus] = useState<BleButtonStatus>(
-    () => BleButton?.getStatus() ?? { registered: false, connected: false },
-  );
+  // 物理ボタン(BLE: iTag型・PTTボタン型)の状態。ロック中でもGATT通知が届くため、
+  // 押下でPTT送信を開始/停止する(押すたびON/OFF、または押している間だけ)。
+  const [bleStatus, setBleStatus] = useState<BleButtonStatus>(readBleStatus);
   const [bleBusy, setBleBusy] = useState(false);
+  // 最後に届いたボタンの状態(画面の状態表示「再接続待ち」「Bluetoothオフ」等に使う)。
+  const [bleState, setBleState] = useState<BleButtonState | null>(null);
+  // 登録直後(と「テスト」)の確認モードの残り秒数(0=確認中でない)と、その間の反応。
+  const [bleTestLeft, setBleTestLeft] = useState(0);
+  // presses=押した(トグル/押す)回数、released=離した通知も届いたか(押している間だけ方式の確認)。
+  const [bleTestHit, setBleTestHit] = useState<{ presses: number; released: boolean } | null>(
+    null,
+  );
+  // 確認モードの期限(押下ハンドラはイベント購読内から呼ばれるため ref で持つ)。
+  const bleTestUntilRef = useRef(0);
+  const bleTestTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // 最新値参照用(BLE押下ハンドラはイベント購読内から呼ばれるため、stateを直接見ると古い値になる)。
   const pttJoinedRef = useRef(false);
   const connectedRef = useRef(false);
@@ -526,7 +615,21 @@ export default function App() {
   // (これが無いと、素早い2度押しが停止でなく再開始になる=止めたつもりで止まらない)。
   const bleTxIntentRef = useRef(false);
   // 今回の送信がBLEトグル起点か(自動停止タイマーを張るのはこの場合のみ)。
+  // 「押している間だけ」方式の押す(down)でも立てる(上限60秒のタイマーを張るため)。
   const bleToggleInitiatedRef = useRef(false);
+  // BLEボタンで始めた送信がどちらの方式か。handleBegin で張る自動停止の長さを決める
+  // (押すたびON/OFF=30秒、押している間だけ=60秒)。
+  const bleTxModeRef = useRef<BleButtonMode>("toggle");
+  // ボタンで始めた前の送信の終了通知(onEndTransmitting)が届く前に、もう一度押された。
+  // その場で開始を要求すると、遅れて届く終了通知が新しい押下の記録まで消してしまい
+  // 「押しているのに送信されない」ため、終了通知を受けてから開始し直す(離す・解除で取り消し)。
+  // at は押された時刻(古すぎる予約で、忘れた頃に送信が始まらないように)。
+  const bleBeginAfterEndRef = useRef<{ mode: BleButtonMode; at: number } | null>(null);
+  // 送信開始の確定待ちの見張り(BLE_BEGIN_WATCHDOG_MS)。
+  const bleBeginWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 直接経路(Android / PTT未参加のiPhone)で、BLEボタンがマイクをONにしたか。
+  // 切断・異常連打・解除の時に「ボタンで始めた送信」だけを確実に止めるために使う。
+  const bleDirectActiveRef = useRef(false);
   // BLEボタンの状態詳細(登録フローの案内文などを画面に出す)。
   const [bleDetail, setBleDetail] = useState<string | null>(null);
   // 画面の「押して話す」ボタンを押している間 true(表示用)。
@@ -562,6 +665,10 @@ export default function App() {
   // トグル判定を最新値で行うための参照 + 自動OFFタイマー。
   const micOnRef = useRef(false);
   const autoOffRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 自動OFFの予約番号と、発火時に行う停止処理(null=予約なし)。Android では JS のタイマーと
+  // ネイティブのタイマーの両方で待ち、先に来た方で一度だけ止める(armAutoOff を参照)。
+  const autoOffSeqRef = useRef(0);
+  const autoOffActionRef = useRef<(() => void) | null>(null);
   // 進行中の接続を共有する(同時に呼ばれた側は同じ結果を待つ。押下の取りこぼし防止)。
   const connectPromiseRef = useRef<Promise<boolean> | null>(null);
   // 勤務の世代番号。退勤のたびに増やす。接続処理は開始時の番号を覚えておき、
@@ -683,6 +790,112 @@ export default function App() {
       clearTimeout(autoOffRef.current);
       autoOffRef.current = null;
     }
+    if (autoOffActionRef.current) {
+      autoOffActionRef.current = null;
+      cancelNativeAutoOff();
+    }
+  }, []);
+
+  // 自動OFF(切り忘れ防止・押している間だけ方式の上限)を予約する。前の予約は取り消す。
+  // Android は画面ロックでアクティビティが一時停止すると JS の setTimeout が発火しない
+  // (React Native の仕様)。ロック中・ポケットの中で始まった送信が止まらなくなるため、
+  // ネイティブのタイマー(AndroidPtt.armAutoOff → onAutoOff)でも同じ時間を測る。
+  const armAutoOff = useCallback(
+    (ms: number, action: () => void) => {
+      clearAutoOff();
+      const seq = ++autoOffSeqRef.current;
+      const fire = () => {
+        // 取り消し済み・新しい予約に置き換わった後の発火は無視する。
+        if (autoOffSeqRef.current !== seq || autoOffActionRef.current !== fire) return;
+        clearAutoOff();
+        action();
+      };
+      autoOffActionRef.current = fire;
+      autoOffRef.current = setTimeout(fire, ms);
+      if (Platform.OS === "android" && typeof AndroidPtt?.armAutoOff === "function") {
+        try {
+          AndroidPtt.armAutoOff(ms, seq);
+        } catch (e) {
+          logDebug(`自動停止: ネイティブのタイマーを使えません ${errMsg(e)}`);
+        }
+      }
+    },
+    [clearAutoOff, logDebug],
+  );
+
+  // ネイティブの自動OFFタイマーの発火(Android)。予約番号が今の予約と一致する時だけ止める。
+  useEffect(() => {
+    if (!AndroidPtt || typeof AndroidPtt.armAutoOff !== "function") return;
+    const sub = AndroidPtt.addListener("onAutoOff", (payload) => {
+      if (payload?.id !== autoOffSeqRef.current) return;
+      autoOffActionRef.current?.();
+    });
+    return () => sub.remove();
+  }, []);
+
+  // BLEボタンの「送信開始の確定待ち」の見張りを止める(確定・終了・拒否のいずれかが来た時)。
+  const clearBleBeginWatchdog = useCallback(() => {
+    if (bleBeginWatchdogRef.current) {
+      clearTimeout(bleBeginWatchdogRef.current);
+      bleBeginWatchdogRef.current = null;
+    }
+  }, []);
+
+  // BLEボタンで送信開始を要求した時に見張りを張る。BLE_BEGIN_WATCHDOG_MS 以内に
+  // 確定(onBeginTransmitting)が来なければ、押下の記録を取り消す。
+  // 記録が残ったままだと、次の押下が「開始」でなく「停止」と判定されて空振りしたり、
+  // 遅れて届いた確定でマイクが開いたりする(取り消し後の確定は handleBegin が即終了させる)。
+  const armBleBeginWatchdog = useCallback(() => {
+    if (bleBeginWatchdogRef.current) clearTimeout(bleBeginWatchdogRef.current);
+    bleBeginWatchdogRef.current = setTimeout(() => {
+      bleBeginWatchdogRef.current = null;
+      if (!bleToggleInitiatedRef.current && !bleTxIntentRef.current) return;
+      logDebug("BLEボタン: 5秒待っても送信が始まらないため、押下の記録を取り消し");
+      bleTxIntentRef.current = false;
+      bleToggleInitiatedRef.current = false;
+    }, BLE_BEGIN_WATCHDOG_MS);
+  }, [logDebug]);
+
+  // 登録済みの物理ボタンへの接続維持を(再)開始し、画面の状態を読み直す。
+  // 前面復帰・出勤のたびに呼ぶ(Bluetoothオフ・許可なし・ボタンが見つからない等の
+  // 失敗からの再試行にもなる。ネイティブ側は二重に呼ばれても接続をやり直さない)。
+  const restartBleButton = useCallback(() => {
+    if (!BleButton) return;
+    try {
+      BleButton.start();
+    } catch (e) {
+      logDebug(`BLEボタン: 接続維持を開始できません ${errMsg(e)}`);
+    }
+    setBleStatus(readBleStatus());
+  }, [logDebug]);
+
+  // 物理ボタンの確認モード(BLE_TEST_MS の間、押下を表示するだけで送信しない)。
+  const stopBleTest = useCallback(() => {
+    bleTestUntilRef.current = 0;
+    if (bleTestTimerRef.current) {
+      clearInterval(bleTestTimerRef.current);
+      bleTestTimerRef.current = null;
+    }
+    setBleTestLeft(0);
+  }, []);
+  const startBleTest = useCallback(() => {
+    bleTestUntilRef.current = Date.now() + BLE_TEST_MS;
+    setBleTestHit(null);
+    setBleTestLeft(Math.ceil(BLE_TEST_MS / 1000));
+    if (bleTestTimerRef.current) clearInterval(bleTestTimerRef.current);
+    bleTestTimerRef.current = setInterval(() => {
+      const left = Math.ceil((bleTestUntilRef.current - Date.now()) / 1000);
+      if (left > 0) {
+        setBleTestLeft(left);
+        return;
+      }
+      bleTestUntilRef.current = 0;
+      if (bleTestTimerRef.current) {
+        clearInterval(bleTestTimerRef.current);
+        bleTestTimerRef.current = null;
+      }
+      setBleTestLeft(0);
+    }, 500);
   }, []);
 
   const cleanup = useCallback(async () => {
@@ -990,6 +1203,7 @@ export default function App() {
   );
 
   // タップ/ハードボタン用トグル: ONにしたら AUTO_OFF_MS で自動OFF。
+  // (Android のロック中も止まるよう、自動OFFは armAutoOff でネイティブのタイマーも使う)
   const toggleMic = useCallback((autoOffMs: number = AUTO_OFF_MS) => {
     const next = !micOnRef.current;
     // 意図をすぐ記録する。micOnRef は送信の切替が終わってから更新されるため、
@@ -998,11 +1212,13 @@ export default function App() {
     void setMic(next);
     clearAutoOff();
     if (next) {
-      autoOffRef.current = setTimeout(() => {
+      armAutoOff(autoOffMs, () => {
+        logDebug("自動停止(切り忘れ防止)");
+        micOnRef.current = false;
         void setMic(false);
-      }, autoOffMs);
+      });
     }
-  }, [setMic, clearAutoOff]);
+  }, [armAutoOff, clearAutoOff, logDebug, setMic]);
 
 
   // PTTのシステム音声セッション(AVAudioSession)が実際に有効になるまで待つ。
@@ -1132,6 +1348,8 @@ export default function App() {
     // 送信の引き継ぎの両方から呼ぶ)。
     const handleBegin = (source: string) => {
       logDebug(`PTT送信開始: ${source}`);
+      // 確定が届いたので、BLEボタンの「確定待ち」の見張りは不要。
+      clearBleBeginWatchdog();
       // 退勤済みなのにチャンネルが残っていた(退出がシステムに拒否された等)。
       // 再接続も送信もせずに止め、退出をやり直す(帰宅後の誤送信を防ぐ)。
       if (clockedOutRef.current) {
@@ -1156,21 +1374,31 @@ export default function App() {
       // 切り忘れ防止タイマーは「送信開始が実際に確定した」この時点で張る。
       // 押下時(要求時)に張ると、要求が失敗した場合にタイマーだけが残り、
       // 30秒後に無関係な送信(ロック画面の長押しなど)を勝手に切ってしまう。
-      // 対象はトグル動作の起点(BLEボタン・イヤホンのボタン)のみ。画面の
-      // ボタンとロック画面のトークボタンは「押している間だけ」なので対象外。
+      // 対象はトグル動作の起点(BLEボタン・イヤホンのボタン)と、BLEボタンの
+      // 「押している間だけ」方式。画面のボタンとロック画面のトークボタンは、指を
+      // 離せば必ず止まるので対象外。BLEボタンの「押している間だけ」は、離した通知が
+      // 電波の途切れ等で届かないと止まらないため、長め(60秒)の上限を張る。
       const fromEarphone = source === PTT_SOURCE.handsfree;
       if (bleToggleInitiatedRef.current || fromEarphone) {
         if (bleTxAutoOffRef.current) clearTimeout(bleTxAutoOffRef.current);
         const byBle = bleToggleInitiatedRef.current;
+        const byBleHold = byBle && bleTxModeRef.current === "hold";
+        const limitMs = byBle ? (byBleHold ? HOLD_MAX_MS : AUTO_OFF_MS) : EARPHONE_AUTO_OFF_MS;
         bleTxAutoOffRef.current = setTimeout(() => {
           logDebug(
-            byBle ? "BLEボタン: 自動停止(切り忘れ防止)" : "イヤホン: 自動停止(切り忘れ防止)",
+            byBleHold
+              ? "BLEボタン: 自動停止(押している間だけ方式の上限60秒)"
+              : byBle
+                ? "BLEボタン: 自動停止(切り忘れ防止)"
+                : "イヤホン: 自動停止(切り忘れ防止)",
           );
+          // 止めた後の次の押下が「停止」と判定されて空振りしないよう、意図も戻す。
+          if (byBle) bleTxIntentRef.current = false;
           void PttChannel?.endTransmitting();
           // システム側の停止が失敗しても(停止通知が来なくても)、マイクは必ず閉じる。
           txActiveRef.current = false;
           void setMic(false);
-        }, byBle ? AUTO_OFF_MS : EARPHONE_AUTO_OFF_MS);
+        }, limitMs);
       }
       void pttTransmitStart();
     };
@@ -1193,11 +1421,41 @@ export default function App() {
         // BLEトグルの意図・タイマーは、どの経路で終了しても確実にリセットする。
         bleTxIntentRef.current = false;
         bleToggleInitiatedRef.current = false;
+        clearBleBeginWatchdog();
         if (bleTxAutoOffRef.current) {
           clearTimeout(bleTxAutoOffRef.current);
           bleTxAutoOffRef.current = null;
         }
         void pttTransmitEnd();
+        // 前の送信の終了待ちだったボタンの押下があれば、ここで開始し直す。
+        const pending = bleBeginAfterEndRef.current;
+        bleBeginAfterEndRef.current = null;
+        if (!pending) return;
+        const age = Date.now() - pending.at;
+        // 古い予約・退勤後・参加が外れた後は開始しない(忘れた頃に送信が始まる事故の防止)。
+        if (
+          clockedOutRef.current ||
+          age < 0 ||
+          age > BLE_REPLAY_MAX_AGE_MS ||
+          !(pttJoinedRef.current || nativePttJoined())
+        ) {
+          logDebug(`BLEボタン: 終了待ちの押下を破棄(${age}ms前)`);
+          return;
+        }
+        bleTxIntentRef.current = true;
+        bleToggleInitiatedRef.current = true;
+        bleTxModeRef.current = pending.mode;
+        armBleBeginWatchdog();
+        logDebug(
+          `BLEボタン: 前の送信の終了を確認 → PTT送信開始(${pending.mode === "hold" ? "押している間だけ" : "押すたびON/OFF"})`,
+        );
+        PttChannel?.beginTransmitting().catch((e) => {
+          // 失敗したら意図もリセットする(離した時・次の押下で無関係な送信を止めないように)。
+          bleTxIntentRef.current = false;
+          bleToggleInitiatedRef.current = false;
+          clearBleBeginWatchdog();
+          logDebug(`BLEボタン: 開始失敗 ${errMsg(e)}`);
+        });
       }),
       PttChannel.addListener("onActivateAudio", () => {
         // 重要: AVAudioSessionを実際に有効化しているのはApple PushToTalk
@@ -1240,6 +1498,7 @@ export default function App() {
           // 戻し、次の押下がまた「開始」になるようにする。
           bleTxIntentRef.current = false;
           bleToggleInitiatedRef.current = false;
+          clearBleBeginWatchdog();
           // 既に送信中(イヤホンで開始済み)の時に画面のボタンを押した場合も
           // 「送信中」として拒否されるが、離せば止まるので案内は出さない。
           if (screenHoldRef.current && !txActiveRef.current && !micOnRef.current) {
@@ -1247,6 +1506,8 @@ export default function App() {
           }
         } else if (kind === "stop") {
           // システム側で送信を止められなかった。少なくともマイクは閉じる。
+          // 終了待ちの開始予約も取り消す(終了通知がいつ届くか分からないため)。
+          bleBeginAfterEndRef.current = null;
           txActiveRef.current = false;
           void setMic(false);
         } else if (kind === "leave") {
@@ -1278,7 +1539,15 @@ export default function App() {
     }
 
     return () => subs.forEach((s) => s?.remove());
-  }, [logDebug, pttTransmitStart, pttTransmitEnd, setMic, setError]);
+  }, [
+    armBleBeginWatchdog,
+    clearBleBeginWatchdog,
+    logDebug,
+    pttTransmitStart,
+    pttTransmitEnd,
+    setMic,
+    setError,
+  ]);
 
   // PTTチャンネルに参加/退出。
   const joinPtt = useCallback(async () => {
@@ -1365,11 +1634,16 @@ export default function App() {
     setClockedOut(false);
     writeSettings({ [SETTINGS_KEYS.clockedOut]: "0" });
     const gen = shiftGenRef.current;
+    // 物理ボタンの接続維持も(再)開始する(音声サーバーへの接続と並行して繋がるように)。
+    restartBleButton();
     const ok = await connect();
     // 接続中に退勤された場合は、ロック中の送信(PTT)を準備しない。
     if (!ok || shiftGenRef.current !== gen) return;
     if (Platform.OS === "android") {
       await startAndroidService();
+      // 出勤時に「付近のデバイス」(Bluetooth)の許可をもらえた場合に備え、もう一度開始する
+      // (許可が無い間はネイティブ側が接続しないため)。
+      restartBleButton();
       return;
     }
     if (!PttChannel) return;
@@ -1379,7 +1653,7 @@ export default function App() {
       return;
     }
     await joinPtt();
-  }, [connect, joinPtt, startAndroidService]);
+  }, [connect, joinPtt, restartBleButton, startAndroidService]);
 
   // 退勤: 送信を止め、PTTチャンネルから退出してから切断する。
   // 以前の「切断する」はLiveKitだけを切り、PTTチャンネルは参加したままだった。
@@ -1398,6 +1672,10 @@ export default function App() {
     txActiveRef.current = false;
     bleTxIntentRef.current = false;
     bleToggleInitiatedRef.current = false;
+    bleDirectActiveRef.current = false;
+    bleBeginAfterEndRef.current = null;
+    clearBleBeginWatchdog();
+    stopBleTest();
     screenHoldRef.current = false;
     if (bleTxAutoOffRef.current) {
       clearTimeout(bleTxAutoOffRef.current);
@@ -1437,7 +1715,7 @@ export default function App() {
       AudioSession.stopAudioSession().catch(() => {});
     }
     logDebug("退勤: 完了");
-  }, [cleanup, logDebug, setError]);
+  }, [cleanup, clearBleBeginWatchdog, logDebug, setError, stopBleTest]);
 
   // イヤホンが無い時の受信音の出力先を切り替える(設定は端末に保存)。
   // スピーカー: ポケットに入れたままでも聞こえる(既定)。
@@ -1522,57 +1800,280 @@ export default function App() {
     else if (path === "direct") void setMic(false);
   }, [pttPressOut, setMic]);
 
-  // BLEボタン(iTag型)押下: 送信ON/OFFのトグル。
-  // PTT参加中はPTKit経由(ロック中でも動く)。未参加で通常接続中なら従来のトグル。
-  const handleBlePress = useCallback(() => {
-    // 参加状態は「ネイティブの真実」も確認する。アプリがメモリ回収→
-    // バックグラウンド復元された直後は、JS側のpttJoinedRefがまだfalseでも
-    // ネイティブのPTChannelManagerは参加済みのことがある(この確認が無いと、
-    // 復元後の押下がすべて「未接続のため無視」になり、ロック運用が死ぬ)。
-    let nativeJoined = false;
-    try {
-      nativeJoined =
-        typeof PttChannel?.getState === "function" ? PttChannel.getState().joined : false;
-    } catch {
-      nativeJoined = false;
-    }
-    if ((pttJoinedRef.current || nativeJoined) && PttChannel) {
-      if (nativeJoined && !pttJoinedRef.current) {
+  // BLEボタンで始めた送信(開始の確定待ちを含む)があれば止める。止めた時は true。
+  // 「離す」を受けた時のほか、ボタンが使えなくなった時(切断・異常連打での一時停止・
+  // Bluetoothオフ・登録解除・再登録の開始・方式の変更)にも呼ぶ。トグル方式でONにした
+  // 送信は、ボタンが使えなくなると誰も止められない(ホットマイク)ため。
+  // ボタン起点でない送信(画面のボタン・イヤホン・ロック画面のトークボタン)には触らない。
+  const stopBleTransmission = useCallback(
+    (reason: string): boolean => {
+      const pttOwned = bleTxIntentRef.current || bleToggleInitiatedRef.current;
+      const directOwned = bleDirectActiveRef.current;
+      bleTxIntentRef.current = false;
+      bleDirectActiveRef.current = false;
+      // 終了待ちの開始予約も取り消す(離した・ボタンが使えなくなった後に送信を始めない)。
+      if (bleBeginAfterEndRef.current) {
+        bleBeginAfterEndRef.current = null;
+        logDebug(`BLEボタン: ${reason} → 開始の予約を取り消し`);
+      }
+      if (!pttOwned && !directOwned) return false;
+      logDebug(`BLEボタン: ${reason} → ボタンで始めた送信を停止`);
+      if (pttOwned) {
+        // bleToggleInitiatedRef は終了通知(onEndTransmitting)で戻す。確定前なら
+        // 意図を消したので、遅れて届いた確定は handleBegin が即終了させる。
+        PttChannel?.endTransmitting().catch((e) => {
+          logDebug(`BLEボタン: 停止失敗 ${errMsg(e)}`);
+        });
+      }
+      if (directOwned) {
+        micOnRef.current = false;
+        void setMic(false);
+      }
+      return true;
+    },
+    [logDebug, setMic],
+  );
+
+  // 物理ボタン(BLE)の押下。payload.kind で動作を分ける(無ければ旧ネイティブ = トグル)。
+  // - toggle: 押すたびに送信ON/OFF(iTag型・トグル方式。30秒で自動停止)
+  // - down/up: 押している間だけ送信(離した通知を送るPTTボタン型。60秒が上限)
+  // PTT参加中はPTKit経由(ロック中でも動く)。未参加で通常接続中なら直接マイクを操作する。
+  // キーボード型リモコン(useRemotePtt)からは引数なしで呼ばれ、トグルとして扱う。
+  // 依存は ref と安定したコールバックのみ(識別子が変わるとイベント購読が張り直しになる)。
+  const handleBlePress = useCallback(
+    (payload?: BlePressEvent | null) => {
+      const fromKeyboard = payload === undefined;
+      const kind: BlePressKind =
+        payload?.kind === "down" || payload?.kind === "up" ? payload.kind : "toggle";
+      const replayed = payload?.replayed === true;
+      const ageMs = typeof payload?.ageMs === "number" ? payload.ageMs : 0;
+      const tag = fromKeyboard
+        ? "リモコン(キーボード型)"
+        : `BLEボタン(${BLE_KIND_LABEL[kind]}${replayed ? `・${ageMs}ms前の再送` : ""})`;
+
+      // 古い押下の再送は捨てる(押したのに反応せず、忘れた頃に送信が始まる事故の防止)。
+      // 「離す」は止める方向なので、どれだけ古くても受け付ける。
+      if (replayed && kind !== "up" && ageMs > BLE_REPLAY_MAX_AGE_MS) {
+        logDebug(`${tag}: 古い押下のため無視`);
+        return;
+      }
+      const bleOwnsTx =
+        bleTxIntentRef.current || bleToggleInitiatedRef.current || bleDirectActiveRef.current;
+      // 確認モード中: 反応を表示するだけで送信しない。ただし、ボタンで始めた送信が
+      // 残っている時の「離す」は、止める方向なので通常どおり処理する。
+      // 送信しないので退勤中でも受け付ける(出勤前にボタンの登録・確認ができるように)。
+      if (
+        !fromKeyboard &&
+        Date.now() < bleTestUntilRef.current &&
+        !(kind === "up" && bleOwnsTx)
+      ) {
+        logDebug(`${tag}: 確認中のため送信しない`);
+        setBleTestHit((prev) => ({
+          presses: (prev?.presses ?? 0) + (kind === "up" ? 0 : 1),
+          released: (prev?.released ?? false) || kind === "up",
+        }));
+        return;
+      }
+      // 退勤後は何もしない(帰宅後に服のボタンが押されても送信しない)。
+      if (clockedOutRef.current) {
+        logDebug(`${tag}: 退勤済みのため無視`);
+        return;
+      }
+
+      // 参加状態は「ネイティブの真実」も確認する。アプリがメモリ回収→
+      // バックグラウンド復元された直後は、JS側のpttJoinedRefがまだfalseでも
+      // ネイティブのPTChannelManagerは参加済みのことがある(この確認が無いと、
+      // 復元後の押下がすべて「未接続のため無視」になり、ロック運用が死ぬ)。
+      const nativeJoined = nativePttJoined();
+      const joined = (pttJoinedRef.current || nativeJoined) && !!PttChannel;
+      if (joined && nativeJoined && !pttJoinedRef.current) {
         setPttJoined(true);
       }
-      // トグル判定は「意図(bleTxIntentRef)」または「確定した送信状態」で行う。
-      // 開始要求から確定イベントまで1秒以上かかることがあり、txActiveRefだけを
-      // 見ると、その間の2度目の押下が「停止」でなく「再開始」になってしまう。
-      const inTx = bleTxIntentRef.current || txActiveRef.current;
-      if (inTx) {
-        bleTxIntentRef.current = false;
-        logDebug("BLEボタン: 押下 → PTT送信停止");
-        PttChannel.endTransmitting().catch((e) => {
-          logDebug(`BLEボタン: 停止失敗 ${e instanceof Error ? e.message : String(e)}`);
-        });
-      } else {
-        bleTxIntentRef.current = true;
-        bleToggleInitiatedRef.current = true;
-        logDebug("BLEボタン: 押下 → PTT送信開始");
-        PttChannel.beginTransmitting().catch((e) => {
-          // 失敗したら意図もリセットする(次の押下がまた「開始」になるように)。
-          bleTxIntentRef.current = false;
-          bleToggleInitiatedRef.current = false;
-          logDebug(`BLEボタン: 開始失敗 ${e instanceof Error ? e.message : String(e)}`);
-        });
-      }
-      return;
-    }
-    if (connectedRef.current) {
-      logDebug("BLEボタン: 押下 → 送信トグル(通常経路)");
-      toggleMic();
-      return;
-    }
-    logDebug("BLEボタン: 押下(未接続のため無視)");
-  }, [logDebug, toggleMic]);
 
-  // イヤホン/BLEリモコンの物理ボタンを購読する。押下は handleBlePress と同じ
-  // 経路(PTT優先)でトグルするため、ロック中・ポケットの中でも送信できる。
+      if (kind === "up") {
+        // まずボタンで始めた送信を止める(始めた経路で止めるので、押している間に
+        // PTTの参加状態が変わっても止め損ねない)。
+        if (stopBleTransmission("離した")) return;
+        // ボタン起点の送信が見当たらない「離す」(切断時にネイティブが合成したもの等)。
+        // 画面のボタンを押している最中なら、その送信は指を離せば止まるので触らない。
+        if (screenHoldRef.current || holdPathRef.current !== null) {
+          logDebug(`${tag}: 画面のボタンで送信中のため何もしない`);
+          return;
+        }
+        // 最後にボタンを「押している間だけ」方式で使った時だけ、残っている送信を止める
+        // (「離した」のに送信が続くことだけは避ける。止める方向なので声は漏れない)。
+        // トグル方式では、切断のたびにネイティブが念のための「離す」を合成して送る。
+        // ボタンの送信は上の stopBleTransmission で止めてあるので、ここで止めると
+        // イヤホン・ロック画面のトークボタンで話している無関係な送信を途中で切ってしまう。
+        if (
+          bleTxModeRef.current === "hold" &&
+          (txActiveRef.current || micOnRef.current || nativePttTransmitting())
+        ) {
+          logDebug(`${tag}: 送信中のため停止`);
+          if (joined) {
+            PttChannel?.endTransmitting().catch((e) => {
+              logDebug(`BLEボタン: 停止失敗 ${errMsg(e)}`);
+            });
+          } else {
+            micOnRef.current = false;
+            void setMic(false);
+          }
+          return;
+        }
+        logDebug(`${tag}: ボタンで始めた送信が無いため何もしない`);
+        return;
+      }
+
+      // ボタンで始めた前の送信が、終了の途中(停止を要求したが終了通知が未着)か。
+      // この間に開始を要求すると、遅れて届く終了通知が新しい押下の記録を消してしまう。
+      const ownTxEnding = () =>
+        bleToggleInitiatedRef.current &&
+        !bleTxIntentRef.current &&
+        (txActiveRef.current || nativePttTransmitting());
+
+      if (joined && PttChannel) {
+        if (kind === "down") {
+          // 押している間だけ方式の「押す」。重複は無視する(ネイティブでも抑止済み)。
+          if (bleTxIntentRef.current) {
+            logDebug(`${tag}: すでに送信中のため無視`);
+            return;
+          }
+          if (ownTxEnding()) {
+            // 離してすぐ押し直した。終了通知を受けてから開始する(離せば取り消し)。
+            bleBeginAfterEndRef.current = { mode: "hold", at: Date.now() };
+            logDebug(`${tag}: 前の送信の終了待ち → 終わり次第開始します`);
+            return;
+          }
+          bleTxIntentRef.current = true;
+          bleTxModeRef.current = "hold";
+          if (txActiveRef.current) {
+            // 別の経路(イヤホン等)で既に送信中。新たに開始はせず、離した時にこの
+            // 送信を止める(押した人が話し終えた合図として扱う)。
+            logDebug(`${tag}: すでに送信中 → 離すと停止します`);
+            return;
+          }
+          // handleBegin が「BLE起点」として上限60秒の自動停止を張るように立てる。
+          bleToggleInitiatedRef.current = true;
+          armBleBeginWatchdog();
+          logDebug(`${tag}: PTT送信開始(押している間だけ)`);
+          PttChannel.beginTransmitting().catch((e) => {
+            // 失敗したら意図もリセットする(離した時に無関係な送信を止めないように)。
+            bleTxIntentRef.current = false;
+            bleToggleInitiatedRef.current = false;
+            clearBleBeginWatchdog();
+            logDebug(`BLEボタン: 開始失敗 ${errMsg(e)}`);
+          });
+          return;
+        }
+        // 終了待ちの開始予約があるうちにもう一度押した =「やっぱり止める」。予約だけ取り消す。
+        if (bleBeginAfterEndRef.current) {
+          bleBeginAfterEndRef.current = null;
+          logDebug(`${tag}: 開始の予約を取り消し`);
+          return;
+        }
+        // トグル判定は「意図(bleTxIntentRef)」または「確定した送信状態」で行う。
+        // 開始要求から確定イベントまで1秒以上かかることがあり、txActiveRefだけを
+        // 見ると、その間の2度目の押下が「停止」でなく「再開始」になってしまう。
+        const inTx = bleTxIntentRef.current || txActiveRef.current;
+        if (!inTx && ownTxEnding()) {
+          // 自動停止の直後に押した等で、前の送信の終了通知がまだ届いていない。
+          // 終了通知を受けてから開始する(もう一度押せば取り消し)。
+          bleBeginAfterEndRef.current = { mode: "toggle", at: Date.now() };
+          logDebug(`${tag}: 前の送信の終了待ち → 終わり次第開始します`);
+          return;
+        }
+        if (inTx) {
+          bleTxIntentRef.current = false;
+          logDebug(`${tag}: PTT送信停止`);
+          PttChannel.endTransmitting().catch((e) => {
+            logDebug(`BLEボタン: 停止失敗 ${errMsg(e)}`);
+          });
+        } else {
+          bleTxIntentRef.current = true;
+          bleToggleInitiatedRef.current = true;
+          bleTxModeRef.current = "toggle";
+          armBleBeginWatchdog();
+          logDebug(`${tag}: PTT送信開始`);
+          PttChannel.beginTransmitting().catch((e) => {
+            // 失敗したら意図もリセットする(次の押下がまた「開始」になるように)。
+            bleTxIntentRef.current = false;
+            bleToggleInitiatedRef.current = false;
+            clearBleBeginWatchdog();
+            logDebug(`BLEボタン: 開始失敗 ${errMsg(e)}`);
+          });
+        }
+        return;
+      }
+
+      // ここから直接経路(Android / PTT未参加のiPhone)。
+      if (!connectedRef.current) {
+        if (wantConnectedRef.current && !connectPromiseRef.current) {
+          logDebug(`${tag}: 未接続のため再接続します(つながったらもう一度押してください)`);
+          void connect();
+        } else {
+          logDebug(`${tag}: 未接続のため無視`);
+        }
+        return;
+      }
+      if (kind === "toggle") {
+        // 次がONかOFFかを先に見ておき、ボタンでONにした送信だけを「ボタン起点」と記録する。
+        const starting = !micOnRef.current;
+        bleDirectActiveRef.current = starting && !fromKeyboard;
+        bleTxModeRef.current = "toggle";
+        logDebug(`${tag}: 送信${starting ? "開始" : "停止"}(通常経路)`);
+        toggleMic(AUTO_OFF_MS);
+        return;
+      }
+      // 押している間だけ方式の「押す」。
+      if (bleDirectActiveRef.current && micOnRef.current) {
+        logDebug(`${tag}: すでに送信中のため無視`);
+        return;
+      }
+      bleDirectActiveRef.current = true;
+      bleTxModeRef.current = "hold";
+      // 意図をすぐ記録する(切替の完了前に届いたイヤホン等のトグルが「停止」と判定されるように)。
+      micOnRef.current = true;
+      // 離した通知が届かない場合に備えた上限(60秒)。setMic(false) の完了で解除される。
+      // Android のロック中も止まるよう、armAutoOff でネイティブのタイマーも使う。
+      const armHoldCap = () => {
+        armAutoOff(HOLD_MAX_MS, () => {
+          logDebug("BLEボタン: 自動停止(押している間だけ方式の上限60秒)");
+          bleDirectActiveRef.current = false;
+          micOnRef.current = false;
+          void setMic(false);
+        });
+      };
+      armHoldCap();
+      logDebug(`${tag}: 送信開始(押している間だけ・通常経路)`);
+      void (async () => {
+        await setMic(true);
+        // マイクの切替中に離された(または上限・切断で止められた)なら閉じ直す
+        // (離した後にONの処理が完了して、マイクが開いたまま残る事故の防止)。
+        if (!bleDirectActiveRef.current) {
+          logDebug("BLEボタン: 切替中に離されたため再OFF");
+          await setMic(false);
+          return;
+        }
+        // 直前の「離す」の OFF 処理が後から完了すると上限タイマーまで消えるため、
+        // マイクが実際に開いた時点で張り直す(上限の無い送信を残さない)。
+        armHoldCap();
+      })();
+    },
+    [
+      armAutoOff,
+      armBleBeginWatchdog,
+      clearBleBeginWatchdog,
+      connect,
+      logDebug,
+      setMic,
+      stopBleTransmission,
+      toggleMic,
+    ],
+  );
+
+  // キーボード型BLEリモコンのキー押下を購読する。押下は handleBlePress と同じ
+  // 経路(PTT優先)でトグルする(引数なしで呼ばれる=トグル)。ただしキーボード型は
+  // 画面ロック中は届かない(iOSの仕様・実機で確認済み)ため、前面で使う時の補助。
   useRemotePtt(handleBlePress, connected);
 
   // Android: イヤホンのボタン(勤務中サービスが受け取ったメディアボタン)で送信の開始/停止。
@@ -1628,6 +2129,10 @@ export default function App() {
         // 画面を開いた時に、音楽アプリに取られたボタンの受け取り先を取り戻す。
         if (running) AndroidPtt.reclaim();
       }
+      // 物理ボタンの接続維持を(再)開始する(Bluetoothオフ・ボタンが見つからない等の
+      // 失敗からの再試行)。退勤中もつないでおく(押下は退勤済みとして無視される)ことで、
+      // 出勤した瞬間からボタンで話せる。
+      restartBleButton();
       if (clockedOutRef.current) {
         // 退勤済み。チャンネルが残っていれば退出をやり直し、自動再接続はしない。
         if (nativePttJoined()) {
@@ -1676,55 +2181,154 @@ export default function App() {
       if (state === "active") onActive();
     });
     return () => sub.remove();
-  }, [connect, logDebug]);
+  }, [connect, logDebug, restartBleButton]);
 
   // BLEボタンのイベント購読 + 起動時の接続維持開始。
+  // 常に表示されている App 本体で購読する(画面の一部に置くと、表示の切替で購読が
+  // 外れて押下を取りこぼすため)。依存はすべて安定したコールバックなので張り直されない。
   useEffect(() => {
     if (!BleButton) return;
-    BleButton.start();
+    try {
+      BleButton.start();
+    } catch (e) {
+      logDebug(`BLEボタン: 接続維持を開始できません ${errMsg(e)}`);
+    }
     const subs = [
-      BleButton.addListener("onPress", () => {
-        handleBlePress();
+      BleButton.addListener("onPress", (payload) => {
+        // 必ずオブジェクトで渡す(引数なしはキーボード型リモコンからの呼び出しと区別するため)。
+        handleBlePress(payload ?? {});
       }),
       BleButton.addListener("onStateChanged", (payload) => {
-        logDebug(`BLEボタン: ${payload.state} ${payload.detail}`);
-        // 診断用の細かい通知で、登録手順の案内文を上書きしない。
-        if (payload.state !== "debug") setBleDetail(payload.detail);
-        setBleStatus(BleButton?.getStatus() ?? { registered: false, connected: false });
+        const state = payload?.state;
+        const detail = payload?.detail ?? "";
+        logDebug(`BLEボタン: ${state ?? "?"} ${detail}`);
+        // 診断用の細かい通知で、登録手順の案内文・状態表示を上書きしない。
+        if (state && state !== "debug") {
+          setBleDetail(detail);
+          setBleState(state);
+        }
+        setBleStatus(readBleStatus());
+        // ボタンが使えなくなった(切断・異常連打での一時停止・Bluetoothオフ・登録解除・
+        // 再登録の開始)。トグル方式でONにした送信は、ボタンではもう止められないので
+        // ここで止める(ネイティブも「離す」を送るが、送らない場合に備えた二重の安全策)。
+        if (
+          state === "disconnected" ||
+          state === "error" ||
+          state === "idle" ||
+          state === "scanning"
+        ) {
+          stopBleTransmission(`ボタンが使えない状態(${state})`);
+        }
       }),
     ];
     return () => subs.forEach((s) => s?.remove());
-  }, [handleBlePress, logDebug]);
+  }, [handleBlePress, logDebug, stopBleTransmission]);
 
-  // BLEボタンの登録(初期設定)。近くのiTag型ボタンを探して保存する。
+  // 確認モードのタイマーを、アプリ終了時に残さない。
+  useEffect(() => {
+    return () => {
+      if (bleTestTimerRef.current) clearInterval(bleTestTimerRef.current);
+    };
+  }, []);
+
+  // BLEボタンの登録(初期設定)。近くのボタンを探し、2回押してもらって確定・保存する。
   const setupBleButton = useCallback(async () => {
     if (!BleButton) {
-      setError("このビルドはBLEボタン未対応です(再ビルドが必要)");
+      setError("このアプリは物理ボタンに未対応です（アプリの更新が必要です）");
       return;
     }
-    setBleBusy(true);
     setError(null);
+    // Android: 検索に必要な許可を先に求める(断られたら「設定を開く」を案内)。
+    try {
+      if (!(await ensureBleSetupPermission())) {
+        logDebug("BLEボタン: 検索に必要な許可が得られませんでした");
+        const level = typeof Platform.Version === "number" ? Platform.Version : 0;
+        setError(
+          level >= 31
+            ? "ボタンを探すには「付近のデバイス」の許可が必要です。「設定を開く」→「権限」→「付近のデバイス」を許可してから、もう一度「ボタンを登録する」を押してください"
+            : "ボタンを探すには位置情報の許可が必要です（Android 11以前の仕様）。「設定を開く」→「権限」→「位置情報」を許可してから、もう一度「ボタンを登録する」を押してください",
+          "settings",
+        );
+        return;
+      }
+    } catch (e) {
+      logDebug(`BLEボタン: 許可の確認に失敗 ${errMsg(e)}`);
+    }
+    stopBleTest();
+    setBleBusy(true);
+    setBleDetail(null);
     try {
       logDebug("BLEボタン: 登録スキャン開始");
       const result = await BleButton.startSetup();
-      logDebug(`BLEボタン: 登録成功 ${result.name}`);
+      logDebug(
+        `BLEボタン: 登録成功 ${result?.name ?? ""}(${result?.holdCapable ? "押している間だけ送信できる" : "押すたびON/OFF"})`,
+      );
+      // 登録できたかを、声を流さずに確かめてもらう(この間の押下は送信しない)。
+      startBleTest();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      logDebug(`BLEボタン: 登録失敗 ${msg}`);
-      setError(msg);
+      const msg = errMsg(e);
+      const code = e && typeof e === "object" ? (e as { code?: unknown }).code : undefined;
+      logDebug(`BLEボタン: 登録失敗 ${typeof code === "string" ? `${code} ` : ""}${msg}`);
+      setError(
+        msg,
+        code === "E_UNAUTHORIZED" || /許可|権限/.test(msg) ? "settings" : undefined,
+      );
     } finally {
       setBleBusy(false);
       // 登録に失敗した場合でも、既存の登録ボタンへの接続維持を必ず復旧させる
       // (ネイティブ側でも復旧するが、JS側からも念押しする)。
-      BleButton?.start();
-      setBleStatus(BleButton?.getStatus() ?? { registered: false, connected: false });
+      restartBleButton();
     }
-  }, [logDebug]);
+  }, [logDebug, restartBleButton, setError, startBleTest, stopBleTest]);
 
+  // 登録の解除(確認してから)。解除するとボタンで話せなくなるため、誤タップで消さない。
   const unregisterBleButton = useCallback(() => {
-    BleButton?.unregister();
-    setBleStatus(BleButton?.getStatus() ?? { registered: false, connected: false });
-  }, []);
+    Alert.alert(
+      "物理ボタンの登録を解除しますか？",
+      "解除すると、このボタンでは話せなくなります。もう一度使う時は「ボタンを登録する」からやり直してください。",
+      [
+        { text: "キャンセル", style: "cancel" },
+        {
+          text: "解除する",
+          style: "destructive",
+          onPress: () => {
+            stopBleTest();
+            // 解除したボタンで始めた送信は、もう止める手段が無いので先に止める。
+            stopBleTransmission("登録解除");
+            try {
+              BleButton?.unregister();
+            } catch (e) {
+              logDebug(`BLEボタン: 登録解除に失敗 ${errMsg(e)}`);
+            }
+            logDebug("BLEボタン: 登録を解除");
+            setBleState("idle");
+            setBleDetail(null);
+            setBleStatus(readBleStatus());
+          },
+        },
+      ],
+    );
+  }, [logDebug, stopBleTest, stopBleTransmission]);
+
+  // 押し方の方式を切り替える(離した通知を送るボタンだけ)。設定はネイティブ側に保存される。
+  const changeBleMode = useCallback(
+    (mode: BleButtonMode) => {
+      if (!BleButton || typeof BleButton.setMode !== "function") return;
+      // 方式が変わると、今の送信を止める手段(離す/もう1回押す)が変わるため、
+      // ボタンで始めた送信があれば先に止める(開いたまま残さない)。
+      stopBleTransmission("方式の変更");
+      try {
+        BleButton.setMode(mode);
+        logDebug(
+          `BLEボタン: 方式を「${mode === "hold" ? "押している間だけ話す" : "押すたびにON/OFF"}」に変更`,
+        );
+      } catch (e) {
+        logDebug(`BLEボタン: 方式を変更できません ${errMsg(e)}`);
+      }
+      setBleStatus(readBleStatus());
+    },
+    [logDebug, stopBleTransmission],
+  );
 
   useEffect(() => {
     return () => {
@@ -1779,20 +2383,54 @@ export default function App() {
   // iOSがチャンネルを復元した場合など)。入力欄を隠すと先に進めなくなるので、その時は出す。
   const needsName = nameMissing && !connected;
   const roomLabel = ROOMS.find((r) => r.id === roomId)?.label ?? roomId;
+  // 物理ボタンの表示用の状態。ready(押下通知の購読が有効)の時だけ「使える」とする
+  // (旧ネイティブビルドは ready を返さないので、その時はリンクの接続で代用する)。
+  const bleRegistered = !!BleButton && bleStatus.registered;
+  const bleReady = bleRegistered && (bleStatus.ready ?? bleStatus.connected) === true;
+  const bleHoldCapable = bleRegistered && bleStatus.holdCapable === true;
+  // 離した通知を送らないボタン(iTag型)は常にトグル。ホールド対応ボタンの既定は「押している間だけ」。
+  const bleMode: BleButtonMode = bleHoldCapable ? (bleStatus.mode ?? "hold") : "toggle";
+  const bleModeLabel =
+    bleMode === "hold" ? "押している間だけ話す" : "押すたびにON/OFF（30秒で自動停止）";
+  // ロック中・ポケットの中でボタンが実際に使えるか。iPhoneはロック中に話す機能
+  // (PushToTalk)、Androidは勤務中サービスが動いている時だけ、裏でも送信できる。
+  const bleCanTalk = bleReady && (Platform.OS === "android" ? androidButtonReady : pttJoined);
+  const bleDetailText = bleDetail ?? "";
+  const blePill: { tone: keyof typeof STATUS_COLORS; text: string } = !BleButton
+    ? { tone: "idle", text: "未対応" }
+    : bleBusy
+      ? { tone: "busy", text: "登録中" }
+      : !bleStatus.registered
+        ? { tone: "idle", text: "未登録" }
+        : bleState === "error"
+          ? bleReady
+            ? { tone: "warn", text: "一時停止中" }
+            : /Bluetoothがオフ/.test(bleDetailText)
+              ? { tone: "warn", text: "Bluetoothオフ" }
+              : /許可|権限/.test(bleDetailText)
+                ? { tone: "warn", text: "許可が必要" }
+                : { tone: "warn", text: "要確認" }
+          : bleReady
+            ? { tone: "ok", text: "準備完了" }
+            : bleState === "connecting"
+              ? { tone: "busy", text: "接続中" }
+              : { tone: "busy", text: "再接続待ち" };
   // 画面上部に出す現在の状態。
   const statusView: { tone: "idle" | "ok" | "busy" | "warn" | "live"; text: string } = micOn
     ? { tone: "live", text: "送信中 — あなたの声が流れています" }
     : connected
-      ? !pttJoined
-        ? androidButtonReady
-          ? { tone: "ok", text: "待機中 — イヤホンのボタンで話せます" }
-          : { tone: "ok", text: "待機中 — 画面のボタンで話せます" }
-        : accessoryOk === false
-          ? {
-              tone: "warn",
-              text: "待機中 — このiPhoneではイヤホンのボタンは使えません。ロック画面のトークボタンで話せます",
-            }
-          : { tone: "ok", text: "待機中 — イヤホンのボタンで話せます" }
+      ? bleCanTalk
+        ? { tone: "ok", text: "待機中 — ボタンで話せます" }
+        : !pttJoined
+          ? androidButtonReady
+            ? { tone: "ok", text: "待機中 — イヤホンのボタンで話せます" }
+            : { tone: "ok", text: "待機中 — 画面のボタンで話せます" }
+          : accessoryOk === false
+            ? {
+                tone: "warn",
+                text: "待機中 — このiPhoneではイヤホンのボタンは使えません。ロック画面のトークボタンで話せます",
+              }
+            : { tone: "ok", text: "待機中 — イヤホンのボタンで話せます" }
       : connecting
         ? { tone: "busy", text: "接続中…" }
         : pttJoined
@@ -2019,6 +2657,150 @@ export default function App() {
             </Text>
           </View>
         ) : null}
+
+        {/* 退勤中も表示する(出勤前にボタンの登録・解除・テストができるように。
+            退勤中の押下は送信されない。話すための案内は「出勤する」を促す) */}
+        <View style={styles.card}>
+          <View style={styles.bleHeader}>
+            <Text style={styles.bleTitle}>🔘 物理ボタン</Text>
+            <View style={[styles.pill, { backgroundColor: STATUS_COLORS[blePill.tone] }]}>
+              <Text style={styles.pillText}>{blePill.text}</Text>
+            </View>
+          </View>
+
+          {!BleButton ? (
+            <Text style={styles.hint}>
+              このアプリは物理ボタンに未対応です（アプリの更新が必要です）。
+            </Text>
+          ) : bleStatus.registered ? (
+            <>
+              <Text style={styles.bleName}>{bleStatus.name ?? "BLEボタン"}</Text>
+              <Text style={styles.bleModeNow}>{bleModeLabel}</Text>
+
+              {bleTestLeft > 0 ? (
+                <View style={styles.bleTestBox}>
+                  <Text style={styles.bleTestTitle}>
+                    テスト中（残り{bleTestLeft}秒）: ボタンを押してみてください。この間は送信しません
+                  </Text>
+                  <Text style={styles.bleTestResult}>
+                    {bleTestHit
+                      ? `反応しました ✅（押した: ${bleTestHit.presses}回${
+                          bleTestHit.released ? "・離したも確認" : ""
+                        }）`
+                      : "まだ反応がありません"}
+                  </Text>
+                </View>
+              ) : null}
+
+              {blePill.tone !== "ok" && bleDetail ? (
+                <Text style={[styles.hint, { color: "#8a5200" }]}>{bleDetail}</Text>
+              ) : null}
+              {blePill.text === "許可が必要" ? (
+                <Pressable
+                  style={styles.errorAction}
+                  onPress={() => {
+                    void Linking.openSettings();
+                  }}
+                >
+                  <Text style={styles.errorActionText}>設定を開く</Text>
+                </Pressable>
+              ) : null}
+
+              {bleHoldCapable && typeof BleButton.setMode === "function" ? (
+                <>
+                  <Text style={[styles.cardLabel, { marginTop: 14 }]}>押し方</Text>
+                  <View style={styles.modeRow}>
+                    {(["hold", "toggle"] as const).map((m) => {
+                      const selected = bleMode === m;
+                      return (
+                        <Pressable
+                          key={m}
+                          style={[styles.modeChip, selected && styles.modeChipOn]}
+                          onPress={() => {
+                            if (!selected) changeBleMode(m);
+                          }}
+                        >
+                          <Text style={[styles.modeChipText, selected && styles.modeChipTextOn]}>
+                            {m === "hold"
+                              ? "押している間だけ話す"
+                              : "押すたびにON/OFF（30秒で自動停止）"}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </>
+              ) : null}
+
+              {Platform.OS === "ios" && PttChannel && !pttJoined ? (
+                <Text style={[styles.hint, { color: "#b76e00" }]}>
+                  {connected
+                    ? "⚠️ ロック中にボタンで話すには「ロック中でも話せるようにする」を押してください。"
+                    : "⚠️ ボタンで話すには「出勤する」を押してください（ロック中に話す機能も準備されます）。"}
+                </Text>
+              ) : null}
+              {Platform.OS === "android" && AndroidPtt && !androidButtonReady ? (
+                <Text style={[styles.hint, { color: "#b76e00" }]}>
+                  ⚠️ ロック中にボタンで話すには「出勤する」を押してください（通知欄に「MIRAI LINK 勤務中」が出ている間だけ使えます）。
+                </Text>
+              ) : null}
+
+              <View style={styles.bleActions}>
+                <Pressable
+                  style={[styles.smallButton, (bleTestLeft > 0 || micOn) && styles.disabled]}
+                  onPress={startBleTest}
+                  disabled={bleTestLeft > 0 || micOn}
+                >
+                  <Text style={styles.smallButtonText}>テスト（10秒）</Text>
+                </Pressable>
+                <Pressable style={styles.smallButton} onPress={unregisterBleButton}>
+                  <Text style={styles.smallButtonText}>登録を解除</Text>
+                </Pressable>
+              </View>
+            </>
+          ) : (
+            <>
+              <Text style={styles.hint}>
+                服や名札に付けたボタンで、スマホを取り出さずに話せます（画面ロック中・ポケットの中でも使えます）。
+              </Text>
+              <Text style={styles.guideTitle}>登録のしかた（1回だけ）</Text>
+              <Text style={styles.bleStep}>1. ボタンの電源を入れる</Text>
+              <Text style={styles.bleStep}>2. スマホのそばに置いて、画面をつけたまま待つ</Text>
+              <Text style={styles.bleStep}>3. 案内が出たら、ボタンを短く2回押す</Text>
+              {bleBusy && bleDetail ? (
+                <View style={styles.bleTestBox}>
+                  <Text style={styles.bleTestTitle}>▶ {bleDetail}</Text>
+                </View>
+              ) : null}
+              <Pressable
+                style={[styles.primary, bleBusy && styles.disabled]}
+                onPress={() => void setupBleButton()}
+                disabled={bleBusy}
+              >
+                <Text style={styles.primaryText}>
+                  {bleBusy ? "登録中…（案内に従ってください）" : "ボタンを登録する"}
+                </Text>
+              </Pressable>
+              <Text style={styles.hint}>
+                使えるボタン: iTag型（紛失防止タグ）・Zello用PTTボタン（PTT-Z01等）。
+                {"\n"}※シャッターリモコン等のキーボード型は、画面ロック中は使えません。
+                {"\n"}※登録は1台ずつ。ほかのボタンやタグは離しておいてください。
+              </Text>
+            </>
+          )}
+
+          {BleButton ? (
+            <>
+              <Text style={styles.guideTitle}>📌 ボタンを使う時の約束</Text>
+              <Text style={styles.hint}>
+                ・アプリを上にスワイプして終了しない
+                {"\n"}・Bluetoothをオフにしない
+                {"\n"}・スマホを再起動したら、一度アプリを開く
+                {"\n"}・iTag型は長押ししない（電源が切れます）
+              </Text>
+            </>
+          ) : null}
+        </View>
         </>
         )}
 
@@ -2072,54 +2854,17 @@ export default function App() {
               )
             ) : null}
 
-            <Text style={[styles.cardLabel, { marginTop: 18 }]}>
-              🔘 BLEボタン（iTag型・任意）
-            </Text>
-            <Text
-              style={[
-                styles.hint,
-                { color: bleStatus.connected ? "#0f8f4f" : bleStatus.registered ? "#b76e00" : "#5a6478" },
-              ]}
-            >
-              {BleButton
-                ? bleStatus.registered
-                  ? `${bleStatus.name ?? "BLEボタン"}: ${bleStatus.connected ? "接続中 ✅" : "未接続（再接続待ち）"}`
-                  : "未登録"
-                : "このビルドは未対応（再ビルドが必要）"}
-            </Text>
+            <Text style={[styles.cardLabel, { marginTop: 18 }]}>🔘 物理ボタン（診断）</Text>
             <Text style={styles.hint}>
-              iTag型（紛失防止タグ）のボタンを登録すると、押すたびに送信の開始/停止ができます。
-              画面ロック中・ポケットの中でも動作します（切り忘れ防止のため約30秒で自動停止）。
-              {"\n"}※シャッターリモコン等のキーボード型はロック中は使えません（iOSの仕様）。
-              {"\n"}※登録は1台ずつ、他のタグは離して行ってください。
+              {BleButton
+                ? `ビルド ${BleButton.buildTag ?? "旧ビルド"} / ${
+                    bleStatus.registered ? `登録: ${bleStatus.name ?? "BLEボタン"}` : "未登録"
+                  } / リンク ${bleStatus.connected ? "あり" : "なし"} / 準備 ${
+                    bleStatus.ready === undefined ? "不明" : bleStatus.ready ? "完了" : "未完了"
+                  } / 方式 ${bleStatus.mode ?? "-"}${bleStatus.holdCapable ? "（離した通知あり）" : ""}`
+                : "このビルドは未対応（再ビルドが必要）"}
+              {bleState ? `\n最後の状態: ${bleState} ${bleDetail ?? ""}` : ""}
             </Text>
-            {bleStatus.registered && !pttJoined ? (
-              <Text style={[styles.hint, { color: "#b76e00" }]}>
-                {connected
-                  ? "⚠️ ロック中にBLEボタンを使うには「ロック中でも話せるようにする」を押してください。"
-                  : "⚠️ ロック中にBLEボタンを使うには「出勤する」を押してください（ロック中に話す機能も準備されます）。"}
-              </Text>
-            ) : null}
-            {bleBusy && bleDetail ? (
-              <Text style={[styles.hint, { color: "#0f4bd8" }]}>▶ {bleDetail}</Text>
-            ) : null}
-            {!bleStatus.registered ? (
-              <Pressable
-                style={[styles.secondary, bleBusy && styles.disabled]}
-                onPress={() => void setupBleButton()}
-                disabled={bleBusy}
-              >
-                <Text style={styles.secondaryText}>
-                  {bleBusy
-                    ? "検索中...（画面の案内に従ってください）"
-                    : "BLEボタンを登録（タグを手元に置いて押す）"}
-                </Text>
-              </Pressable>
-            ) : (
-              <Pressable style={styles.secondary} onPress={unregisterBleButton}>
-                <Text style={styles.secondaryText}>BLEボタンの登録を解除</Text>
-              </Pressable>
-            )}
 
             <Text style={[styles.cardLabel, { marginTop: 18 }]}>
               🪵 診断ログ（新しい順・不具合の報告時にスクリーンショットを送ってください）
@@ -2294,4 +3039,41 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   errorActionText: { color: "#fff", fontWeight: "700" },
+  // 物理ボタンのカード
+  bleHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  bleTitle: { color: "#1f2f58", fontSize: 17, fontWeight: "800", flexShrink: 1 },
+  pill: { borderRadius: 999, paddingHorizontal: 12, paddingVertical: 5, marginLeft: 8 },
+  pillText: { color: "#ffffff", fontSize: 13, fontWeight: "700" },
+  bleName: { marginTop: 12, color: "#172033", fontSize: 16, fontWeight: "700" },
+  bleModeNow: { marginTop: 4, color: "#475467", fontSize: 14 },
+  bleStep: { marginTop: 8, color: "#172033", fontSize: 15, fontWeight: "600", lineHeight: 21 },
+  bleTestBox: {
+    marginTop: 12,
+    backgroundColor: "#eef4ff",
+    borderColor: "#b9cdf7",
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+  },
+  bleTestTitle: { color: "#0f4bd8", fontSize: 15, fontWeight: "700", lineHeight: 21 },
+  bleTestResult: { marginTop: 8, color: "#0f8f4f", fontSize: 18, fontWeight: "800" },
+  modeRow: { gap: 8 },
+  modeChip: {
+    backgroundColor: "#edf1f8",
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  modeChipOn: { backgroundColor: "#27354f" },
+  modeChipText: { color: "#27354f", fontWeight: "600", fontSize: 15 },
+  modeChipTextOn: { color: "#ffffff" },
+  bleActions: { flexDirection: "row", gap: 8, marginTop: 16 },
+  smallButton: {
+    flex: 1,
+    backgroundColor: "#e6eaf2",
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  smallButtonText: { color: "#1f2f58", fontSize: 15, fontWeight: "700" },
 });
