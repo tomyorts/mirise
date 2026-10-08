@@ -1,0 +1,20 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'jp.co.medident.mirailink'
+version = '1.0.0'
+
+android {
+  namespace "jp.co.medident.mirailink.ble"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+}
+
+dependencies {
+  // ContextCompat.checkSelfPermission(Bluetooth権限の確認)
+  implementation "androidx.core:core-ktx:1.13.1"
+}

@@ -1,5 +1,6 @@
 package jp.co.medident.mirailink.ptt
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFormat
@@ -22,6 +24,7 @@ import android.support.v4.media.session.PlaybackStateCompat
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 
 // 勤務中(出勤〜退勤)だけ動く常駐サービス(Android版)。
 //
@@ -29,6 +32,8 @@ import androidx.core.app.ServiceCompat
 // アプリへ渡す公式の仕組み」が無いため、次の組み合わせで同じことを実現する。
 //  1. フォアグラウンドサービス: 通知を出して常駐し、画面ロック中もアプリと
 //     マイク・音声接続が止められないようにする(種別 microphone)。
+//     BLEボタン(ble-button モジュール)の接続もこの常駐で保たれる
+//     (「付近のデバイス」が許可済みなら種別 connectedDevice も付ける)。
 //  2. MediaSession: イヤホンの再生/停止ボタン(メディアボタン)を受け取る。
 //     Android は「最後に音を鳴らしたメディアセッション」にボタンを渡すため、
 //     開始時に0.5秒の無音を鳴らして受け取り先になる(音楽アプリに取られた時は
@@ -108,7 +113,7 @@ class PttService : Service() {
 
     val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
       .setContentTitle("$title 勤務中")
-      .setContentText("イヤホンのボタンで話せます。帰るときはアプリで「退勤する」を押してください")
+      .setContentText("ボタンまたはイヤホンのボタンで話せます。帰るときはアプリで「退勤する」を押してください")
       .setSmallIcon(applicationInfo.icon)
       .setOngoing(true)
       .setOnlyAlertOnce(true)
@@ -124,7 +129,29 @@ class PttService : Service() {
     } else {
       0
     }
-    ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, types)
+    val deviceType = connectedDeviceTypeIfAllowed()
+    try {
+      ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, types or deviceType)
+    } catch (e: SecurityException) {
+      // 種別 connectedDevice の前提を OS が満たさないと判断した場合(機種差など)は、
+      // BLEボタンの種別だけ外して常駐を続ける(マイク・音声の常駐が本来の目的のため)。
+      if (deviceType == 0) throw e
+      ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, types)
+    }
+  }
+
+  // BLEボタン(付近のデバイス)と常時接続していることを OS に示す種別。
+  // Android 14以降は「付近のデバイス」(BLUETOOTH_CONNECT)が未許可のまま
+  // この種別を付けると SecurityException で常駐自体が失敗するため、許可済みの時だけ付ける。
+  private fun connectedDeviceTypeIfAllowed(): Int {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+      ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
+      PackageManager.PERMISSION_GRANTED
+    ) {
+      return 0
+    }
+    return ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
   }
 
   // 画面ロック中も CPU を止めない(止まると音声接続が途切れ、受信できなくなる)。
