@@ -457,6 +457,59 @@ h2 {
   color: #ffffff;
 }
 
+/* 「全体」は外せない(常に聞く)ので、押せなくても薄くしない。 */
+.roomButtons button.fixedChip:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.emptyHint {
+  margin: 0 0 18px;
+  color: #667085;
+  line-height: 1.6;
+}
+
+/* 個別に話す設定中の表示(残り時間と「全員（ルーム）に戻す」ボタン)。 */
+.dmStatus {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 14px 18px;
+  border-radius: 18px;
+  background: #f3eefe;
+  color: #4b2a8a;
+  border: 1px solid #d9cbf7;
+  line-height: 1.6;
+}
+
+.dmStatus p {
+  margin: 0;
+  flex: 1 1 320px;
+}
+
+/* 今話している人(受信中)の表示。 */
+.speakers {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.speakerLine {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: #e8f6ee;
+  color: #0f6d3b;
+  font-weight: 700;
+}
+
+.speakerDm {
+  background: #f3eefe;
+  color: #4b2a8a;
+}
+
 .volumeRow {
   display: flex;
   flex-direction: column;
