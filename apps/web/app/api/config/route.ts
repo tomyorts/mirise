@@ -3,12 +3,13 @@ import { SESSION_COOKIE, verifySessionToken } from "@/app/lib/auth";
 import { withBroadcastChannel } from "@/app/lib/channels";
 import { bearerToken, verifyDeviceToken } from "@/app/lib/deviceAuth";
 import { BROADCAST_ROOM_ID, INTERCOM_ROOMS } from "@/app/lib/rooms";
-import { getRooms, getStaff } from "@/app/lib/store";
+import { getStaff, readRooms } from "@/app/lib/store";
 
 // 現在のルーム一覧とスタッフ名を返す。
 // - PC画面(ログインセッション): インカム画面がこれを読んで、管理画面での変更を即反映する。
 // - iPhone/Androidアプリ(端末トークン、Authorization: Bearer): 起動時・画面に戻った時に読み、
 //   管理画面で追加・名前変更したルームをアプリにも出す。検証は /api/token と同じ。
+// 保存先(Upstash)を一時的に読めない時は 503(code=rooms_unavailable)を返し、初期値は返さない。
 export async function GET(request: NextRequest) {
   const authSecret = process.env.AUTH_SECRET;
   const clinicPassword = process.env.CLINIC_PASSWORD;
@@ -33,7 +34,20 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const [storedRooms, staff] = await Promise.all([getRooms(), getStaff()]);
+  const [roomsResult, staff] = await Promise.all([readRooms(), getStaff()]);
+  if (!roomsResult.ok) {
+    // 保存先を読めなかった(一時的な障害)。初期値を返すと、管理画面で追加したルームが
+    // 「削除された」と扱われて各端末の聞くルームから外れるため、エラーにする
+    // (アプリ・PC画面は保存済みの一覧のまま動き続ける)。
+    return NextResponse.json(
+      {
+        error: "ルーム一覧を一時的に読み込めません。しばらくしてから、もう一度お試しください。",
+        code: "rooms_unavailable",
+      },
+      { status: 503 }
+    );
+  }
+  const storedRooms = roomsResult.rooms;
   // 「全体」(ID "all")は全員が必ず聞くチャンネル・緊急呼び出し先なので、
   // 管理画面で消されていても既定の内容で必ず返す。
   const broadcastRoom = INTERCOM_ROOMS.find((room) => room.id === BROADCAST_ROOM_ID) ?? {

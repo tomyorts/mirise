@@ -6,7 +6,7 @@ import {
   DISPLAY_NAME_MESSAGES,
   DISPLAY_NAME_PATTERN,
 } from "@/app/lib/staffIdentity";
-import { getRooms, getStaff, isStoreConfigured, saveRooms, saveStaff } from "@/app/lib/store";
+import { isStoreConfigured, readRooms, readStaff, saveRooms, saveStaff } from "@/app/lib/store";
 
 async function requireAdmin(request: NextRequest) {
   const secret = process.env.AUTH_SECRET;
@@ -61,8 +61,23 @@ export async function GET(request: NextRequest) {
   if (!(await requireAdmin(request))) {
     return NextResponse.json({ error: "管理者のみアクセスできます" }, { status: 403 });
   }
-  const [rooms, staff] = await Promise.all([getRooms(), getStaff()]);
-  return NextResponse.json({ rooms, staff, storeConfigured: isStoreConfigured() });
+  const [roomsResult, staffResult] = await Promise.all([readRooms(), readStaff()]);
+  if (!roomsResult.ok || !staffResult.ok) {
+    // 一時的に読めなかった時に初期値を返すと、それを保存して設定を消してしまうため、エラーにする。
+    return NextResponse.json(
+      {
+        error:
+          "保存先からルーム・スタッフを読み込めませんでした。時間をおいてページを再読み込みしてください（設定が消えないよう、このままでは保存できません）",
+        code: "store_unavailable",
+      },
+      { status: 503 }
+    );
+  }
+  return NextResponse.json({
+    rooms: roomsResult.rooms,
+    staff: staffResult.staff,
+    storeConfigured: isStoreConfigured(),
+  });
 }
 
 export async function POST(request: NextRequest) {

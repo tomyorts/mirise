@@ -55,6 +55,8 @@ export function AdminClient() {
   const [storeConfigured, setStoreConfigured] = useState(true);
   const [csvText, setCsvText] = useState("");
   const [loading, setLoading] = useState(true);
+  // 読み込みに失敗した(保存先の一時的な不調など)。この状態で保存すると設定が消えるため保存させない。
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -99,6 +101,7 @@ export function AdminClient() {
         setStaff(data.staff);
         setStoreConfigured(data.storeConfigured);
       } catch (err) {
+        setLoadFailed(true);
         setError(err instanceof Error ? err.message : "読み込みに失敗しました");
       } finally {
         setLoading(false);
@@ -370,7 +373,7 @@ export function AdminClient() {
       </section>
 
       <section className="panel">
-        <button className="primary" onClick={() => void save()} disabled={saving || !storeConfigured}>
+        <button className="primary" onClick={() => void save()} disabled={saving || !storeConfigured || loadFailed}>
           {saving ? "保存中..." : "保存する"}
         </button>
         {message ? <p className="adminMessage">{message}</p> : null}
