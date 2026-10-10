@@ -26,8 +26,41 @@ import {
   AudioEngineMuteMode,
   audioDeviceModuleEvents,
 } from "@livekit/react-native-webrtc";
-import { ConnectionState, DisconnectReason, Room, RoomEvent, Track } from "livekit-client";
+import {
+  ConnectionState,
+  DisconnectReason,
+  Room,
+  RoomEvent,
+  Track,
+  type LocalParticipant,
+  type LocalTrack,
+  type Participant,
+  type RemoteParticipant,
+} from "livekit-client";
 import { useRemotePtt } from "./hooks/useRemotePtt";
+import {
+  ATTR,
+  BROADCAST_CHANNEL,
+  BROADCAST_LABEL,
+  DM_REVERT_MS,
+  SHARED_ROOM,
+  buildAttributes,
+  channelLabel,
+  dmRemainingMs,
+  dmTalk,
+  dmTargetOf,
+  isChannelId,
+  isDmTo,
+  normalizeListen,
+  parseListen,
+  parseTalk,
+  pickTalkChannel,
+  serializeListen,
+  shouldHear,
+  speakerLabel,
+  withBroadcastChannel,
+  type ChannelInfo,
+} from "./src/channels";
 import BleButton, {
   type BleButtonMode,
   type BleButtonState,
@@ -99,6 +132,8 @@ if (Platform.OS === "ios") {
 const API_BASE = "https://mirisevoicelink.vercel.app";
 const TOKEN_ENDPOINT = `${API_BASE}/api/token`;
 const DEVICE_LOGIN_ENDPOINT = `${API_BASE}/api/device-login`;
+// ルーム一覧(管理画面で追加・名前変更したもの)。端末トークンで読める。
+const CONFIG_ENDPOINT = `${API_BASE}/api/config`;
 
 // 旧方式のAPIキー(合言葉)。開発ビルドでのみ使う(EXPO_PUBLIC_INTERCOM_KEY を設定した時だけ)。
 // スタッフに配るビルドには設定しないこと: アプリから取り出せるため、院外に渡ると
@@ -188,13 +223,28 @@ async function deviceLogin(password: string): Promise<void> {
   }
 }
 
-const ROOMS = [
+// ---- ルーム(チャンネル) ----
+// 新しいアプリは全員、音声サーバー(LiveKit)の同じルーム(SHARED_ROOM)に入り、管理画面の
+// 「ルーム」はその中のチャンネルとして扱う。誰の声を聞くかは、各自が自分に付ける参加者属性
+// (聞くルーム・話す先)で決まるので、出勤したままルームを切り替え・複数のルームを聞ける。
+// 一覧はサーバー(/api/config)から読んで端末に保存し、読めない時は保存済み→下の既定を使う。
+type ChannelItem = ChannelInfo & { description?: string };
+const DEFAULT_CHANNELS: ChannelItem[] = [
   { id: "front", label: "受付" },
   { id: "clinic", label: "診療室" },
   { id: "surgery", label: "オペ" },
   { id: "sterilization", label: "滅菌" },
-  { id: "all", label: "全体" },
+  { id: BROADCAST_CHANNEL, label: BROADCAST_LABEL },
 ];
+// 管理画面で「全体」が消されていても、必ず一覧に残す(全員が常に聞くチャンネル)。
+const BROADCAST_ITEM: ChannelItem = { id: BROADCAST_CHANNEL, label: BROADCAST_LABEL };
+// 初めて使う端末の話す先(以前の既定の参加ルームと同じ)。
+const DEFAULT_TALK_CHANNEL = "clinic";
+
+// 個別に話す相手(出勤中の人。identity は LiveKit の参加者ID、name は表示名)。
+type DmTarget = { identity: string; name: string };
+// 「個別に話す」の候補(共通ルームに入っている自分以外の人)。home はその人の主なルーム。
+type Person = { identity: string; name: string; home: string };
 
 // ---- 端末内に保存する設定(スタッフ名・ルーム・端末ID) ----
 // iOSの NSUserDefaults を使う React Native 標準の Settings を利用する(追加の
@@ -205,7 +255,12 @@ const ROOMS = [
 // ※Android版では Settings が使えないため、Android対応時に置き換えること。
 const SETTINGS_KEYS = {
   displayName: "mirise.displayName",
+  // 話す先のルーム(以前の「参加ルーム」と同じキー。個別に話す相手は保存しない)。
   room: "mirise.room",
+  // 聞くルーム(カンマ区切り。"all" は常に含む)。
+  listen: "mirise.listen",
+  // サーバーから読んだルーム一覧(JSON)。次の起動時・サーバーに繋がらない時に使う。
+  channels: "mirise.channels",
   deviceTag: "mirise.deviceTag",
   speaker: "mirise.speaker",
   clockedOut: "mirise.clockedOut",
@@ -235,6 +290,53 @@ function writeSettings(values: Record<string, string>) {
   } catch {
     // 保存できなくても動作は続ける(次回の起動時に再入力になるだけ)。
   }
+}
+
+// サーバー・端末から読んだルーム一覧を確かめて整える(形式が違えば null)。
+// ID の規則に合わないもの・重複は除き、「全体」が無ければ足す。
+function parseChannelList(value: unknown): ChannelItem[] | null {
+  if (!Array.isArray(value)) return null;
+  const items: ChannelItem[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    const o = raw as { id?: unknown; label?: unknown; description?: unknown };
+    if (!isChannelId(o.id)) continue;
+    const label = typeof o.label === "string" && o.label.trim() ? o.label.trim() : o.id;
+    items.push({
+      id: o.id,
+      label,
+      ...(typeof o.description === "string" && o.description ? { description: o.description } : {}),
+    });
+  }
+  return items.length > 0 ? withBroadcastChannel(items, BROADCAST_ITEM) : null;
+}
+
+// 端末に保存したルーム一覧(無い・壊れている時は既定の一覧)。
+function loadSavedChannels(): ChannelItem[] {
+  const saved = readSetting(SETTINGS_KEYS.channels);
+  if (saved) {
+    try {
+      const list = parseChannelList(JSON.parse(saved));
+      if (list) return list;
+    } catch {
+      // 壊れていたら既定の一覧を使う
+    }
+  }
+  return withBroadcastChannel(DEFAULT_CHANNELS, BROADCAST_ITEM);
+}
+
+// 端末に保存した聞くルーム・話す先。聞くルームを保存していない旧版から更新した直後は、
+// 保存していた「参加ルーム」を聞くルーム・話す先にする(以前と同じ人の声が聞こえるように)。
+function loadSavedListenTalk(): { listen: string[]; talk: string } {
+  const savedTalk = readSetting(SETTINGS_KEYS.room);
+  const savedListen = readSetting(SETTINGS_KEYS.listen);
+  const talk = isChannelId(savedTalk) ? savedTalk : DEFAULT_TALK_CHANNEL;
+  const listen = savedListen !== null ? parseListen(savedListen) : normalizeListen([talk]);
+  return { listen, talk: pickTalkChannel(talk, listen) };
+}
+
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
 // 端末ごとに固定のランダムな識別子(英小文字+数字6桁)。初回に作って保存する。
@@ -427,6 +529,19 @@ function nativePttTransmitting(): boolean {
   }
 }
 
+// ネイティブ側でPTTの音声セッションが有効か(null=分からない・旧ビルド)。
+// JS側の記録は無効化の通知を取りこぼすと「有効」のまま残りうるため、こちらを優先する
+// (有効になる前にマイクを開くと、成功に見えても無音になる)。
+function nativePttAudioActive(): boolean | null {
+  try {
+    if (typeof PttChannel?.getState !== "function") return null;
+    const active = PttChannel.getState().audioActive;
+    return typeof active === "boolean" ? active : null;
+  } catch {
+    return null;
+  }
+}
+
 // Android: ネイティブの自動OFFタイマーの予約を取り消す(旧ビルド・iPhoneでは何もしない)。
 function cancelNativeAutoOff(): void {
   try {
@@ -472,16 +587,292 @@ const TOKEN_TIMEOUT_MS = 8_000;
 // イヤホン押下からの再接続を待つ上限。超えたらこの送信は諦めて「送信中」表示を
 // 消す(接続自体は裏で続けてよい。繋がれば受信はできる)。
 const RECONNECT_TIMEOUT_MS = 12_000;
+// 送信開始時に LiveKit が自分で復旧中(休止明けの再接続など)だった場合に、その完了を
+// 待つ上限。過ぎても戻らなければ、接続を作り直す(残りは RECONNECT_TIMEOUT_MS の範囲内)。
+const LINK_RECOVERY_WAIT_MS = 5_000;
+// PTTのシステム音声セッションが有効になるのを待つ上限(実機で1秒以上かかることがある)。
+const AUDIO_ACTIVE_WAIT_MS = 3_000;
+// 送信の直前に、話す先(個別の期限切れで全員に戻す等)の反映を待つ上限。ふだんは反映済みで
+// 待たない。これを過ぎたら、その送信は諦める(違う相手・広い範囲に声が届かないように)。
+const TALK_READY_WAIT_MS = 5_000;
+// ルーム一覧をサーバーへ取りに行く最短の間隔(前面に戻るたびに取りに行きすぎない)。
+const CHANNELS_REFRESH_MIN_MS = 30_000;
+// 個別の自動解除を、送信中(押した後・開始の確定待ちを含む)だったために見送った時に
+// 確かめ直す間隔。送信が始まらずに終わった(システムに拒否された等)場合も、これで戻る。
+const DM_RECHECK_MS = 1_000;
+// 押下から送信開始の確定(onBeginTransmitting)までを同じ押下とみなす上限。
+// 個別の期限は押した時刻で判断するため、確定まで押下の時刻を持ち越す。
+const PRESS_TIME_MAX_AGE_MS = 10_000;
+// 送信ごとの所要時間の記録を、この時間を過ぎたら「未完了」として打ち切る。
+const TX_TRACE_MAX_MS = 20_000;
+// 診断ログを画面に反映する間隔。1行ごとに画面全体を再描画すると、ロック中の送信の
+// 処理(押下→送信開始)と同じJSスレッドを取り合って遅くなるため、まとめて反映する。
+const DEBUG_LOG_FLUSH_MS = 400;
+
+// LiveKit のトークンを使い回す上限(サーバーの有効期限は8時間。余裕を持たせる)。
+// 再接続のたびに取り直すと、休止明けの通信(名前解決・暗号化の確立・サーバーの起動待ち)で
+// 0.2〜2秒かかるため、同じ名前・端末・ルームなら発行から6時間までは使い回す。
+// 退勤・端末登録の解除・接続の失敗では必ず捨てる(次は取り直す)。
+const TOKEN_REUSE_MS = 6 * 60 * 60 * 1000;
+let tokenCache: { key: string; at: number; token: string; url: string } | null = null;
+// 捨てた回数。取得中に捨てられた(退勤・端末トークンの無効化など)トークンを、
+// 取得し終えた後に覚え直さないために使う。
+let tokenCacheGen = 0;
+
+function clearTokenCache(): void {
+  tokenCache = null;
+  tokenCacheGen += 1;
+}
+
+async function getLiveKitToken(body: {
+  identity: string;
+  name: string;
+  room: string;
+}): Promise<{ token: string; url: string; reusedAgeMs: number | null }> {
+  const key = `${body.identity}\n${body.name}\n${body.room}`;
+  const now = Date.now();
+  const cached = tokenCache;
+  if (cached && cached.key === key) {
+    const age = now - cached.at;
+    // 時計が巻き戻った(age<0)時も、念のため取り直す。
+    if (age >= 0 && age < TOKEN_REUSE_MS) {
+      return { token: cached.token, url: cached.url, reusedAgeMs: age };
+    }
+  }
+  tokenCache = null;
+  const gen = tokenCacheGen;
+  const fresh = await fetchToken(body);
+  // 発行時刻は要求した時点で記録する(実際の発行より古く見積もる=安全側)。
+  // 取得中に捨てられていたら覚えない(退勤後・ログイン解除後に使い回さない)。
+  if (gen === tokenCacheGen) tokenCache = { key, at: now, token: fresh.token, url: fresh.url };
+  return { ...fresh, reusedAgeMs: null };
+}
+
+// ---- LiveKit の接続状態の判定(送信開始時に、作り直しが本当に必要かを決める) ----
+// ok: そのまま話せる / resuming: LiveKit が切断を検知して自分で復旧中(待てば戻る) /
+// dead: 接続が無い・完全に切れた(作り直しが必要)。
+type LinkHealth = "ok" | "resuming" | "dead";
+// SignalConnectionState.CONNECTED の値(ライブラリから公開されていないため数値で比べる)。
+const SIGNAL_CONNECTED = 1;
+
+function linkHealth(room: Room | null): LinkHealth {
+  if (!room) return "dead";
+  const state = room.state;
+  // Connecting は進行中の connect() の途中(connect() を呼べば同じ結果を待てる)。
+  if (state === ConnectionState.Disconnected || state === ConnectionState.Connecting) return "dead";
+  if (state === ConnectionState.Reconnecting || state === ConnectionState.SignalReconnecting) {
+    return "resuming";
+  }
+  try {
+    // 切断後は engine が外される(型の上では常にある)。
+    const engine: Room["engine"] | undefined = room.engine;
+    if (!engine || engine.isClosed) return "dead";
+    // 部屋の状態がまだ「接続中」でも、通信路(WebSocket)が閉じていれば LiveKit が
+    // 直後に復旧を始める(休止明けに期限切れのタイマーが動いた直後など)。
+    if (engine.client.isDisconnected || engine.client.currentState !== SIGNAL_CONNECTED) {
+      return "resuming";
+    }
+    const pc = engine.pcManager?.publisher.getConnectionState();
+    if (pc === "failed" || pc === "disconnected" || pc === "closed") return "resuming";
+  } catch {
+    // ライブラリの内部の形が変わっていても、部屋の状態だけで判断して続ける。
+  }
+  return "ok";
+}
+
+// 診断ログ用: 音声サーバーとの往復時間(ms)。取れなければ "?"。
+function signalRtt(room: Room | null): string {
+  try {
+    const engine: Room["engine"] | undefined = room?.engine;
+    return engine ? String(engine.client.rtt) : "?";
+  } catch {
+    return "?";
+  }
+}
+
+// LiveKit 自身の復旧(Reconnected)か、諦めた(Disconnected)のを待つ。音声の通信路
+// (PeerConnection)だけが一時的に乱れて LiveKit が何もせずに自然に戻る場合は通知が
+// 来ないので、状態も短い間隔で確かめる。上限を過ぎた時点で使える状態なら復旧扱い。
+// iPhoneのPTT送信中(システムがアプリを動かし続けている間)だけ使う。Androidのロック中は
+// JSのタイマーが止まるため、この待ち方は使わないこと。
+const LINK_POLL_MS = 100;
+function waitRoomRecovery(
+  room: Room,
+  timeoutMs: number,
+): Promise<"reconnected" | "disconnected" | "timeout"> {
+  if (linkHealth(room) === "ok") return Promise.resolve("reconnected");
+  if (room.state === ConnectionState.Disconnected) return Promise.resolve("disconnected");
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let poll: ReturnType<typeof setInterval> | undefined;
+    let settled = false;
+    const finish = (result: "reconnected" | "disconnected" | "timeout") => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (poll) clearInterval(poll);
+      room.off(RoomEvent.Reconnected, onReconnected);
+      room.off(RoomEvent.Disconnected, onDisconnected);
+      resolve(result);
+    };
+    const onReconnected = () => finish("reconnected");
+    const onDisconnected = () => finish("disconnected");
+    room.on(RoomEvent.Reconnected, onReconnected);
+    room.on(RoomEvent.Disconnected, onDisconnected);
+    poll = setInterval(() => {
+      if (room.state === ConnectionState.Disconnected) finish("disconnected");
+      else if (linkHealth(room) === "ok") finish("reconnected");
+    }, LINK_POLL_MS);
+    timer = setTimeout(
+      () => finish(linkHealth(room) === "ok" ? "reconnected" : "timeout"),
+      Math.max(0, timeoutMs),
+    );
+  });
+}
+
+// 診断ログの時刻(時:分:秒.ミリ秒)。送信の各段階の間隔を読み取れるようにする。
+function logTime(d: Date): string {
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${String(
+    d.getMilliseconds(),
+  ).padStart(3, "0")}`;
+}
+
+// サーバーへの認証ヘッダー(端末トークン。開発ビルドで旧方式のキーがあればそれ)。
+async function appAuthHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {};
+  const deviceToken = await loadDeviceToken();
+  if (deviceToken) headers.Authorization = `Bearer ${deviceToken}`;
+  else if (INTERCOM_KEY) headers["x-intercom-key"] = INTERCOM_KEY;
+  return headers;
+}
+
+// ルーム一覧を /api/config から読む(管理画面での追加・名前変更をアプリにも出すため)。
+// 認証は /api/token と同じ端末トークン。端末トークンが無効なら code=device_token_invalid の
+// 例外にする(トークンを消して再ログインを促すかは、勤務中かどうかで呼び出し側が決める)。
+async function fetchChannels(): Promise<ChannelItem[]> {
+  const headers = await appAuthHeaders();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TOKEN_TIMEOUT_MS);
+  try {
+    const response = await fetch(CONFIG_ENDPOINT, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+    let data: { rooms?: unknown; error?: string; code?: string } = {};
+    try {
+      data = (await response.json()) as typeof data;
+    } catch {
+      // HTMLのエラーページなど
+    }
+    if (!response.ok) {
+      const err = new Error(
+        data.error ?? `ルーム一覧を取得できませんでした(HTTP ${response.status})`,
+      ) as Error & { status?: number; code?: string };
+      err.status = response.status;
+      err.code = data.code;
+      throw err;
+    }
+    const list = parseChannelList(data.rooms);
+    if (!list) throw new Error("ルーム一覧の形式が正しくありません");
+    return list;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---- 参加者属性(聞くルーム・話す先)の反映 ----
+// 自分の参加者属性がサーバーに反映済みか(サーバーから届いた値と比べる。'' は未設定と同じ)。
+function attributesApplied(lp: LocalParticipant, attrs: Record<string, string>): boolean {
+  const current = lp.attributes;
+  return Object.entries(attrs).every(([key, value]) => (current[key] ?? "") === value);
+}
+
+// サーバーが自分の属性の更新を許可しているか(不明なら許可とみなす)。古いサーバー・許可の無い
+// トークンでは話す先を知らせられず、相手からは「全体」あてに見える(全員に届く)。
+// そのため「全体」あて以外の送信はしない(isTalkReady。PC画面と同じ)。
+function canSetAttributes(room: Room): boolean {
+  return room.localParticipant.permissions?.canUpdateMetadata !== false;
+}
+
+// 属性の反映を待つ上限(画面表示中・iPhoneのPTT送信中の補助。Android のロック中は
+// このタイマーは動かないが、反映の通知・切断・再接続のどれかで必ず終わる)。
+const ATTR_SYNC_TIMEOUT_MS = 5_000;
+
+// 自分の参加者属性を更新し、サーバーに反映されるまで待つ(true=反映済み)。
+// 反映は、サーバーから届く自分の ParticipantAttributesChanged で確かめる。
+// setAttributes() 自体の完了待ちは JS のタイマー(50msごとの確認)頼みで、Android の
+// ロック中はタイマーが止まって終わらない(ロック解除後に失敗扱いになる)ため、それは待たない。
+// LiveKit が接続し直した(Reconnected)時も一度終える(完全な再接続ではサーバー上の属性が
+// 消えるので、呼び出し側でもう一度送り直す)。
+function setAttributesAndWait(
+  room: Room,
+  attrs: Record<string, string>,
+  timeoutMs: number,
+  log: (msg: string) => void,
+): Promise<boolean> {
+  const lp = room.localParticipant;
+  if (attributesApplied(lp, attrs)) return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      room.off(RoomEvent.ParticipantAttributesChanged, onChanged);
+      room.off(RoomEvent.Reconnected, onReconnected);
+      room.off(RoomEvent.Disconnected, onDisconnected);
+      resolve(ok);
+    };
+    const onChanged = (_changed: Record<string, string>, p: Participant) => {
+      if (p === lp && attributesApplied(lp, attrs)) finish(true);
+    };
+    const onReconnected = () => finish(attributesApplied(lp, attrs));
+    const onDisconnected = () => finish(false);
+    room.on(RoomEvent.ParticipantAttributesChanged, onChanged);
+    room.on(RoomEvent.Reconnected, onReconnected);
+    room.on(RoomEvent.Disconnected, onDisconnected);
+    timer = setTimeout(() => finish(attributesApplied(lp, attrs)), Math.max(0, timeoutMs));
+    lp.setAttributes(attrs).then(
+      () => finish(attributesApplied(lp, attrs)),
+      (e: unknown) => {
+        // ロック解除後に届く「時間切れ」は、反映済みなら無視してよい。
+        if (!attributesApplied(lp, attrs)) log(`属性: 更新に失敗 ${errMsg(e)}`);
+        finish(attributesApplied(lp, attrs));
+      },
+    );
+  });
+}
+
+// 一定時間で待つのをやめる(時間切れ・失敗のときは fallback を返す)。
+// Android のロック中はタイマーが動かないので、待つ相手が必ず終わるものにだけ使う。
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), Math.max(0, ms));
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      },
+    );
+  });
+}
 
 async function fetchToken(body: {
   identity: string;
   name: string;
   room: string;
 }): Promise<{ token: string; url: string }> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const deviceToken = await loadDeviceToken();
-  if (deviceToken) headers.Authorization = `Bearer ${deviceToken}`;
-  else if (INTERCOM_KEY) headers["x-intercom-key"] = INTERCOM_KEY;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(await appAuthHeaders()),
+  };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TOKEN_TIMEOUT_MS);
   try {
@@ -547,17 +938,53 @@ async function applyAudioCategory(preferSpeaker: boolean, log: (msg: string) => 
 
 export default function App() {
   const roomRef = useRef<Room | null>(null);
-  // スタッフ名(画面表示用)とルーム。前回の値を端末から復元する。
+  // スタッフ名(画面表示用)。前回の値を端末から復元する。
   const [identity, setIdentity] = useState(() => readSetting(SETTINGS_KEYS.displayName) ?? "");
-  const [roomId, setRoomId] = useState(() => {
-    const saved = readSetting(SETTINGS_KEYS.room);
-    return saved && ROOMS.some((r) => r.id === saved) ? saved : "clinic";
-  });
+  // ルーム一覧(サーバーから読んだもの。読めない時は保存済み・既定)と、
+  // 聞くルーム(複数。"all" は常に含む)・話す先のルーム。前回の値を端末から復元する。
+  const [channels, setChannels] = useState<ChannelItem[]>(loadSavedChannels);
+  const [initialPrefs] = useState(loadSavedListenTalk);
+  const [listen, setListen] = useState<string[]>(initialPrefs.listen);
+  const [talkChannel, setTalkChannel] = useState(initialPrefs.talk);
   // connect() はイヤホン押下の再接続経路からも呼ばれるため、名前・ルームは
   // state ではなく ref から読む(state に依存すると入力のたびに connect が
   // 作り直され、PTTのイベント購読まで張り直しになる)。
   const identityRef = useRef(identity);
-  const roomIdRef = useRef(roomId);
+  const channelsRef = useRef(channels);
+  const listenRef = useRef(listen);
+  const talkChannelRef = useRef(talkChannel);
+  // 個別に話す相手(null=個別でない)。自動で全員(ルーム)に戻す時間の起点は dmSinceRef
+  // (最後に個別で話し終えた時刻。まだ話していなければ選んだ時刻)。端末には保存しない。
+  const [dmTarget, setDmTarget] = useState<DmTarget | null>(null);
+  const dmTargetRef = useRef<DmTarget | null>(null);
+  const [dmSince, setDmSince] = useState(0);
+  const dmSinceRef = useRef(0);
+  const dmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 個別の残り時間の表示用の現在時刻(画面表示中だけ1秒ごとに進める)。
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  // サーバーに知らせた受信許可(null=全員に許可 / identity=その人だけに許可)。接続ごとに戻る。
+  const permTargetRef = useRef<string | null>(null);
+  // マイクを開いている間の話す先(開いた時点でサーバーに知らせてあった値)。開いている間は
+  // 話す先を変えないため、属性を送り直す時もこの値を使う。閉じ終えたら null。
+  const micOpenTalkRef = useRef<string | null>(null);
+  // 属性・受信許可の反映処理(同時に1つだけ)と、反映中に頼まれた「もう一度」。
+  const syncPromiseRef = useRef<Promise<boolean> | null>(null);
+  const syncAgainRef = useRef(false);
+  // 「個別に話す」の候補(共通ルームにいる自分以外の人)。
+  const [people, setPeople] = useState<Person[]>([]);
+  // お知らせ(個別が自動で戻った等。エラーではない案内)。
+  const [notice, setNotice] = useState<string | null>(null);
+  // ルーム一覧を最後にサーバーへ取りに行った時刻(前面に戻るたびに取りに行きすぎない)。
+  const channelsFetchedAtRef = useRef(0);
+  // 無くなったルームの整理を送信中のため後回しにしたか、と整理の処理(後で定義する。
+  // マイクを閉じ終えた時の処理から呼ぶため ref 経由)。
+  const channelsPrunePendingRef = useRef(false);
+  const channelsPruneRef = useRef<(why: string) => void>(() => {});
+  // 今のルーム一覧がサーバーから読んだもの(端末に保存した分を含む)か。一度も読めていない
+  // (既定の一覧)間は、それに無いルームを「削除された」として聞くルームから外さない。
+  const channelsFromServerRef = useRef(readSetting(SETTINGS_KEYS.channels) !== null);
+  // 「話す先のルームが無くなった」と知らせたルーム(同じ知らせを何度も出さない)。
+  const missingTalkNotifiedRef = useRef<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [micOn, setMicOn] = useState(false);
@@ -630,6 +1057,11 @@ export default function App() {
   // 直接経路(Android / PTT未参加のiPhone)で、BLEボタンがマイクをONにしたか。
   // 切断・異常連打・解除の時に「ボタンで始めた送信」だけを確実に止めるために使う。
   const bleDirectActiveRef = useRef(false);
+  // 直接経路の送信開始/停止の世代番号。話す先の反映を待っている間に止められた・押し直された
+  // 送信を、反映後に開かないために使う(PTT経路の txGenRef と同じ考え方)。
+  const directTxGenRef = useRef(0);
+  // 直接経路で、話す先の反映を待ってマイクを開こうとしている処理の数(この間も「送信中」扱い)。
+  const directOpeningRef = useRef(0);
   // BLEボタンの状態詳細(登録フローの案内文などを画面に出す)。
   const [bleDetail, setBleDetail] = useState<string | null>(null);
   // 画面の「押して話す」ボタンを押している間 true(表示用)。
@@ -637,8 +1069,11 @@ export default function App() {
   // 押した時にどちらの経路で送信を始めたか。離した時に同じ経路で止めるために覚えておく
   // (押している間に参加状態が変わっても、開始と停止の経路が食い違わないようにする)。
   const holdPathRef = useRef<"ptt" | "direct" | null>(null);
-  // 今話している他のスタッフの名前(サーバーの音声検出による)。
-  const [remoteSpeakers, setRemoteSpeakers] = useState<string[]>([]);
+  // 今話している他のスタッフ(サーバーの音声検出による。自分に聞こえる人だけ)。
+  // dm=自分あての個別。
+  const [remoteSpeakers, setRemoteSpeakers] = useState<
+    { key: string; text: string; dm: boolean }[]
+  >([]);
   // 「詳細設定・診断」を開いているか。
   const [advancedOpen, setAdvancedOpen] = useState(false);
   // 名前が保存されていない(勤務中の復元時に名前の入力が必要)。入力中に1文字目で
@@ -687,19 +1122,106 @@ export default function App() {
   // PTT送信の意図(トークボタンを押している間true)。
   // 再接続完了時に既に離されていたら送信しない=ホットマイク(切り忘れ)防止の要。
   const txActiveRef = useRef(false);
+  // アプリが送信開始を要求した押下(画面のボタン・BLEボタン)の時刻(0=なし)。
+  // 開始の確定(handleBegin)で受け取り、個別の期限を「押した時刻」で判断するのに使う。
+  const pressAtRef = useRef(0);
   // PTTのシステム音声セッションが有効か(didActivate/didDeactivate)。
   const audioActiveRef = useRef(false);
-  // JSハートビート。iOSがアプリを休止するとinterval が止まるので、
-  // 大きな空白=休止明けと判定し、見かけ上「接続中」でも信用せず再接続する。
+  // 音声セッションの有効化を待っている処理(waitAudioActive)。onActivateAudio で解除する。
+  const audioActiveWaitersRef = useRef(new Set<() => void>());
+  // 公開済みのマイクのトラック(止める時に直接ミュートするため。接続ごとに作り直す)。
+  const micTrackRef = useRef<LocalTrack | null>(null);
+  // JSハートビート。iOSがアプリを休止するとintervalが止まるので、空白の長さが
+  // 「どれだけ休止していたか」の目安になる(診断ログ用)。接続を作り直すかどうかの
+  // 判定には使わない(LiveKit の実際の状態を linkHealth で見る)。
   const lastAliveRef = useRef(Date.now());
   // ロック中/バックグラウンドのPTT送信経路を後から確認するための診断ログ。
   // 画面が見えないタイミングの処理を、あとで(ロック解除後に)時系列で追える。
+  // 行はまず ref に貯め、画面には前面にある時だけまとめて反映する(1行ごとに
+  // setState すると、ロック中の送信の処理中にも画面全体の再描画が何度も走るため)。
+  // 時刻は記録した瞬間のものなので、反映を遅らせても各段階の間隔は正確に残る。
   const [debugLog, setDebugLog] = useState<string[]>([]);
-  const logDebug = useCallback((msg: string) => {
-    const t = new Date().toTimeString().slice(0, 8);
-    // 1回の送信で10行前後出るため、数回分さかのぼれるよう多めに保持する。
-    setDebugLog((prev) => [...prev.slice(-(DEBUG_LOG_MAX - 1)), `${t} ${msg}`]);
+  const debugBufRef = useRef<string[]>([]);
+  const debugFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushDebugLog = useCallback(() => {
+    if (debugFlushTimerRef.current) {
+      clearTimeout(debugFlushTimerRef.current);
+      debugFlushTimerRef.current = null;
+    }
+    setDebugLog(debugBufRef.current.slice());
   }, []);
+  const logDebug = useCallback((msg: string) => {
+    const buf = debugBufRef.current;
+    buf.push(`${logTime(new Date())} ${msg}`);
+    // 1回の送信で10行前後出るため、数回分さかのぼれるよう多めに保持する。
+    if (buf.length > DEBUG_LOG_MAX) buf.splice(0, buf.length - DEBUG_LOG_MAX);
+    // 裏・ロック中は反映しない(前面に戻った時にまとめて反映する)。Android のロック中は
+    // JSのタイマーが動かないので、タイマーにも頼らない。
+    const appState = AppState.currentState;
+    if (debugFlushTimerRef.current || appState === "background" || appState === "inactive") return;
+    debugFlushTimerRef.current = setTimeout(() => {
+      debugFlushTimerRef.current = null;
+      setDebugLog(debugBufRef.current.slice());
+    }, DEBUG_LOG_FLUSH_MS);
+  }, []);
+
+  // 前面に戻ったら、裏で貯まった診断ログを画面に反映する。
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") flushDebugLog();
+    });
+    return () => {
+      sub.remove();
+      if (debugFlushTimerRef.current) clearTimeout(debugFlushTimerRef.current);
+    };
+  }, [flushDebugLog]);
+
+  // ---- 送信ごとの所要時間の記録 ----
+  // 押下 → 開始要求 → 開始確定 → 音声有効 → マイクON を、押下からの経過ミリ秒で
+  // 1行にまとめて診断ログに出す(ロック中の送信のどこで時間がかかっているかを、
+  // 現場のログから読み取れるようにする)。ネイティブが押下を受け取った時刻が分かれば、
+  // そこを起点にする(JSが起こされるまでの遅れも見える)。
+  const txTraceRef = useRef<{ id: number; t0: number; marks: string[] } | null>(null);
+  const txTraceSeqRef = useRef(0);
+  const traceEnd = useCallback(
+    (result: string) => {
+      const tr = txTraceRef.current;
+      if (!tr) return;
+      txTraceRef.current = null;
+      logDebug(`⏱ 送信#${tr.id} ${tr.marks.join(" → ")} [${result}]`);
+    },
+    [logDebug],
+  );
+  const traceStart = useCallback(
+    (label: string, receivedAt: number, nativeAt?: number) => {
+      // 前の記録が終わらないまま次が始まった(確定が来なかった等)。分かるように残す。
+      if (txTraceRef.current) traceEnd("未完了");
+      const marks: string[] = [];
+      let t0 = receivedAt;
+      const nativeDelay = nativeAt === undefined ? -1 : receivedAt - nativeAt;
+      if (nativeDelay >= 0 && nativeDelay < TX_TRACE_MAX_MS) {
+        t0 = receivedAt - nativeDelay;
+        marks.push(`${label}(ネイティブ受信)+0`, `JS受信+${nativeDelay}`);
+      } else {
+        marks.push(`${label}+0`);
+      }
+      txTraceRef.current = { id: ++txTraceSeqRef.current, t0, marks };
+    },
+    [traceEnd],
+  );
+  const traceMark = useCallback(
+    (label: string) => {
+      const tr = txTraceRef.current;
+      if (!tr) return;
+      const elapsed = Date.now() - tr.t0;
+      if (elapsed > TX_TRACE_MAX_MS) {
+        traceEnd("未完了(時間切れ)");
+        return;
+      }
+      tr.marks.push(`${label}+${elapsed}`);
+    },
+    [traceEnd],
+  );
 
   // setupIOSAudioManagement相当を自前で実装し、各段階をlogDebugに出す。
   // WebRTCの録音/再生エンジンがON/OFFされる直前(willEnableEngine)・直後
@@ -775,10 +1297,6 @@ export default function App() {
   }, [identity]);
 
   useEffect(() => {
-    roomIdRef.current = roomId;
-  }, [roomId]);
-
-  useEffect(() => {
     const id = setInterval(() => {
       lastAliveRef.current = Date.now();
     }, 3000);
@@ -851,10 +1369,11 @@ export default function App() {
       bleBeginWatchdogRef.current = null;
       if (!bleToggleInitiatedRef.current && !bleTxIntentRef.current) return;
       logDebug("BLEボタン: 5秒待っても送信が始まらないため、押下の記録を取り消し");
+      traceEnd("開始確定が来ない");
       bleTxIntentRef.current = false;
       bleToggleInitiatedRef.current = false;
     }, BLE_BEGIN_WATCHDOG_MS);
-  }, [logDebug]);
+  }, [logDebug, traceEnd]);
 
   // 登録済みの物理ボタンへの接続維持を(再)開始し、画面の状態を読み直す。
   // 前面復帰・出勤のたびに呼ぶ(Bluetoothオフ・許可なし・ボタンが見つからない等の
@@ -898,6 +1417,342 @@ export default function App() {
     }, 500);
   }, []);
 
+  // ---- 聞くルーム・話す先・個別に話す(参加者属性・購読・受信許可) ----
+  // 送信中(マイクを開いている・開こうとしている)か。この間は聞くルーム・話す先を変えない
+  // (画面の操作は無効。個別の自動解除は送信が終わってから)。
+  // (micOnRef は画面の状態から遅れて戻ることがあるので使わない。マイクを開いている間は
+  // micOpenTalkRef、開く前は各経路の「押した」記録で判断する)
+  const isTransmittingNow = useCallback(
+    () =>
+      micOpenTalkRef.current !== null ||
+      txActiveRef.current ||
+      bleTxIntentRef.current ||
+      screenHoldRef.current ||
+      holdPathRef.current !== null ||
+      directOpeningRef.current > 0,
+    [],
+  );
+
+  // 今サーバーに知らせるべき話す先(個別なら "dm:<相手>"、そうでなければ話す先のルーム)。
+  const desiredTalk = useCallback(
+    (): string =>
+      dmTargetRef.current ? dmTalk(dmTargetRef.current.identity) : talkChannelRef.current,
+    [],
+  );
+  // 実際に送る話す先。マイクを開いている間は、開いた時の値のまま(送信中に変えない)。
+  const effectiveTalk = useCallback(
+    (): string => micOpenTalkRef.current ?? desiredTalk(),
+    [desiredTalk],
+  );
+  const desiredAttributes = useCallback(
+    () =>
+      buildAttributes({
+        listen: listenRef.current,
+        talk: effectiveTalk(),
+        home: talkChannelRef.current,
+      }),
+    [effectiveTalk],
+  );
+
+  // 話す先と個別の受信許可がサーバーに反映済みか(マイクを開いてよいかの判定)。
+  const isTalkReady = useCallback(
+    (room: Room): boolean => {
+      const talk = desiredTalk();
+      if (permTargetRef.current !== dmTargetOf(talk)) return false;
+      // 属性を更新できない接続では、相手からは「全体」あてに見える(ルームあてのつもりの声が
+      // 全員に届き、個別も相手の画面で個別と分からない)。PC画面と同じく、「全体」あての時だけ話す。
+      if (!canSetAttributes(room)) return talk === BROADCAST_CHANNEL;
+      return (room.localParticipant.attributes[ATTR.talk] ?? "") === talk;
+    },
+    [desiredTalk],
+  );
+  // 属性すべて(聞くルームなど)と受信許可が反映済みか。
+  const isTalkSynced = useCallback(
+    (room: Room): boolean =>
+      permTargetRef.current === dmTargetOf(effectiveTalk()) &&
+      (!canSetAttributes(room) || attributesApplied(room.localParticipant, desiredAttributes())),
+    [desiredAttributes, effectiveTalk],
+  );
+
+  // 相手のマイクを聞くかを、相手の話す先と自分の聞くルームから決めて購読に反映する。
+  // 呼ぶたびにサーバーへ通知が飛ぶので、変わる時だけ呼ぶ。
+  const applySubscription = useCallback((room: Room, p: RemoteParticipant) => {
+    const pub = p.getTrackPublication(Track.Source.Microphone);
+    if (!pub) return; // マイクの公開前。公開された時(TrackPublished)に決め直す
+    const want = shouldHear(room.localParticipant.identity, listenRef.current, p.attributes);
+    if (pub.isDesired !== want) pub.setSubscribed(want);
+  }, []);
+  const applyAllSubscriptions = useCallback(
+    (room: Room) => {
+      room.remoteParticipants.forEach((p) => applySubscription(room, p));
+    },
+    [applySubscription],
+  );
+
+  // 今話している人(サーバーの音声検出の最新の一覧)から、自分に聞こえる人だけを画面に出す。
+  // 音声検出の通知は話している人の顔ぶれが変わった時にしか来ないので、聞くルーム・相手の
+  // 話す先が変わった時にもここで出し直す(聞こえなくなった人を出し続けない・聞こえる人を漏らさない)。
+  const activeSpeakersRef = useRef<Participant[]>([]);
+  const refreshSpeakers = useCallback((room: Room) => {
+    if (roomRef.current !== room) return;
+    const lp = room.localParticipant;
+    const self = lp.identity;
+    const lines = activeSpeakersRef.current
+      .filter((s) => s.sid !== lp.sid && shouldHear(self, listenRef.current, s.attributes))
+      .map((s) => ({
+        key: s.identity,
+        text: speakerLabel(displayNameOf(s), self, s.attributes, channelsRef.current),
+        dm: isDmTo(self, s.attributes),
+      }));
+    setRemoteSpeakers((prev) =>
+      prev.length === lines.length &&
+      prev.every((n, i) => n.key === lines[i].key && n.text === lines[i].text)
+        ? prev
+        : lines,
+    );
+  }, []);
+
+  // 「個別に話す」の候補(共通ルームにいる自分以外の人)を読み直す。
+  const refreshPeople = useCallback((room: Room) => {
+    if (roomRef.current !== room) return;
+    const list: Person[] = [];
+    room.remoteParticipants.forEach((p) => {
+      if (!p.identity) return;
+      list.push({ identity: p.identity, name: displayNameOf(p), home: p.attributes[ATTR.home] ?? "" });
+    });
+    list.sort((a, b) => a.name.localeCompare(b.name, "ja") || a.identity.localeCompare(b.identity));
+    setPeople((prev) =>
+      prev.length === list.length &&
+      prev.every(
+        (x, i) =>
+          x.identity === list[i].identity && x.name === list[i].name && x.home === list[i].home,
+      )
+        ? prev
+        : list,
+    );
+  }, []);
+
+  // 話す先・聞くルームを自分の参加者属性としてサーバーに知らせる(1回分)。
+  // - 個別にする時は、先に「相手だけが受信できる」許可にしてから話す先を知らせる
+  //   (他の人に届かないことはサーバーが守る)。
+  // - 個別をやめる時は、先に話す先を知らせ、反映されてから全員に受信を許可する。
+  // 受信許可の変更はサーバーの応答が無いが、通知は送った順に届くので、後から送った属性の
+  // 反映が確かめられれば、許可も反映済みとみなせる。
+  // マイクを開いている間は受信許可を変えない(広げない)。
+  const runTalkSync = useCallback(
+    async (room: Room): Promise<boolean> => {
+      if (roomRef.current !== room) return false;
+      if (room.state === ConnectionState.Disconnected || room.state === ConnectionState.Connecting) {
+        return false;
+      }
+      const lp = room.localParticipant;
+      const target = dmTargetOf(effectiveTalk());
+      if (target !== null) {
+        if (permTargetRef.current !== target) {
+          if (micOpenTalkRef.current !== null) return false;
+          lp.setTrackSubscriptionPermissions(false, [
+            { participantIdentity: target, allowAll: true },
+          ]);
+          permTargetRef.current = target;
+          logDebug(`個別: 受信できるのを ${target} だけにした`);
+        }
+        if (!canSetAttributes(room)) return true;
+        return setAttributesAndWait(room, desiredAttributes(), ATTR_SYNC_TIMEOUT_MS, logDebug);
+      }
+      if (canSetAttributes(room)) {
+        const applied = await setAttributesAndWait(
+          room,
+          desiredAttributes(),
+          ATTR_SYNC_TIMEOUT_MS,
+          logDebug,
+        );
+        if (!applied || roomRef.current !== room) return false;
+      }
+      // 待っている間に個別へ切り替わった・マイクを開いた時は、全員には許可しない。
+      if (
+        permTargetRef.current !== null &&
+        micOpenTalkRef.current === null &&
+        dmTargetOf(effectiveTalk()) === null
+      ) {
+        lp.setTrackSubscriptionPermissions(true);
+        permTargetRef.current = null;
+        logDebug("個別: 全員が受信できるように戻した");
+      }
+      return true;
+    },
+    [desiredAttributes, effectiveTalk, logDebug],
+  );
+
+  // 話す先・聞くルームの反映を(同時に1つだけ)行う。反映中に頼まれたら、終わった後に
+  // 最新の値でもう一度行う。戻り値は、終わった時点で反映済みか。
+  const syncRoomRef = useRef<Room | null>(null);
+  const syncTalkState = useCallback((): Promise<boolean> => {
+    const room = roomRef.current;
+    if (!room) return Promise.resolve(false);
+    if (syncPromiseRef.current && syncRoomRef.current === room) {
+      syncAgainRef.current = true;
+      return syncPromiseRef.current;
+    }
+    let promise: Promise<boolean> | null = null;
+    promise = (async () => {
+      let ok = false;
+      try {
+        do {
+          syncAgainRef.current = false;
+          ok = await runTalkSync(room);
+        } while (syncAgainRef.current && roomRef.current === room);
+      } catch (e) {
+        logDebug(`属性: 反映に失敗 ${errMsg(e)}`);
+        ok = false;
+      } finally {
+        if (syncPromiseRef.current === promise) {
+          syncPromiseRef.current = null;
+          syncRoomRef.current = null;
+        }
+      }
+      return ok && roomRef.current === room && isTalkSynced(room);
+    })();
+    syncPromiseRef.current = promise;
+    syncRoomRef.current = room;
+    return promise;
+  }, [isTalkSynced, logDebug, runTalkSync]);
+
+  // 反映が必要なら行う(結果は待たない)。
+  const requestTalkSync = useCallback(() => {
+    const room = roomRef.current;
+    if (!room) return;
+    if (syncPromiseRef.current || !isTalkSynced(room)) void syncTalkState();
+  }, [isTalkSynced, syncTalkState]);
+
+  const roomTalkLabel = useCallback(
+    () => channelLabel(talkChannelRef.current, channelsRef.current),
+    [],
+  );
+
+  // 個別の状態だけを消す(サーバーへの反映は呼び出し側で)。
+  const clearDmState = useCallback(() => {
+    if (dmTimerRef.current) {
+      clearTimeout(dmTimerRef.current);
+      dmTimerRef.current = null;
+    }
+    dmTargetRef.current = null;
+    setDmTarget(null);
+  }, []);
+
+  // 個別をやめて、話す先のルーム(全員)に戻す。
+  const revertDm = useCallback(
+    (reason: string, message: string | null) => {
+      const dm = dmTargetRef.current;
+      if (!dm) return;
+      clearDmState();
+      logDebug(`個別: ${dm.name}さんとの個別を終了(${reason}) → 話す先「${roomTalkLabel()}」`);
+      if (message) setNotice(message);
+      requestTalkSync();
+    },
+    [clearDmState, logDebug, requestTalkSync, roomTalkLabel],
+  );
+
+  // 個別の期限(最後に個別で話し終えてから DM_REVERT_MS)を確かめ、過ぎていれば全員(ルーム)に
+  // 戻す。まだなら、その時刻にもう一度確かめるタイマーを張る。送信中は戻さない(マイクを閉じ終えた
+  // 時に確かめる。送信が始まらずに終わる場合もあるので、DM_RECHECK_MS ごとにも確かめ直す)。
+  // タイマーは裏・ロック中には止まることがある(Android のロック中は必ず止まる)ので、
+  // 送信を始める時にも必ず確かめる(expireDmIfDue)。
+  const checkDmExpiryRef = useRef<() => void>(() => {});
+  const checkDmExpiry = useCallback(() => {
+    if (dmTimerRef.current) {
+      clearTimeout(dmTimerRef.current);
+      dmTimerRef.current = null;
+    }
+    if (!dmTargetRef.current) return;
+    if (isTransmittingNow()) {
+      dmTimerRef.current = setTimeout(() => {
+        dmTimerRef.current = null;
+        checkDmExpiryRef.current();
+      }, DM_RECHECK_MS);
+      return;
+    }
+    const remaining = dmRemainingMs(dmSinceRef.current, Date.now());
+    if (remaining <= 0) {
+      revertDm(
+        "時間切れ",
+        `個別に話す時間（${DM_REVERT_MS / 1000}秒）が過ぎたため、話す先を「${roomTalkLabel()}」に戻しました`,
+      );
+      return;
+    }
+    dmTimerRef.current = setTimeout(() => {
+      dmTimerRef.current = null;
+      checkDmExpiryRef.current();
+    }, remaining + 100);
+  }, [isTransmittingNow, revertDm, roomTalkLabel]);
+  useEffect(() => {
+    checkDmExpiryRef.current = checkDmExpiry;
+  }, [checkDmExpiry]);
+
+  // 送信を始める時の個別の期限の確認(タイマーに頼らない)。過ぎていれば個別の状態を消す
+  // (反映は呼び出し側で待つ)。戻した時は true。
+  // 期限は「押した時刻(pressedAt)」で判断する。押した時にまだ個別の時間内なら、その後の
+  // 音声の準備・接続の復旧を待つ間に期限を過ぎても個別のまま送る(個別のつもりの返事が
+  // ルームの全員に届かないように)。
+  const expireDmIfDue = useCallback(
+    (label: string, pressedAt: number): boolean => {
+      const dm = dmTargetRef.current;
+      if (!dm || dmRemainingMs(dmSinceRef.current, pressedAt) > 0) return false;
+      clearDmState();
+      logDebug(
+        `${label}: 個別の時間が過ぎていたため、話す先を「${roomTalkLabel()}」に戻してから送信`,
+      );
+      setNotice(
+        `${dm.name}さんとの個別の時間（${DM_REVERT_MS / 1000}秒）が過ぎていたため、話す先を「${roomTalkLabel()}」（全員）に戻して送信しました`,
+      );
+      return true;
+    },
+    [clearDmState, logDebug, roomTalkLabel],
+  );
+
+  // 押した瞬間に、個別の期限の確認と話す先の反映を始めておく(待たない)。
+  // システムの送信開始の確定(0.1〜0.5秒)と並行して進むので、その分早く話せる。
+  // pressedAt は押した時刻(個別の期限の判断に使う)。
+  const kickTalkSync = useCallback(
+    (label: string, pressedAt: number) => {
+      expireDmIfDue(label, pressedAt);
+      const room = roomRef.current;
+      if (room && !isTalkReady(room)) void syncTalkState();
+    },
+    [expireDmIfDue, isTalkReady, syncTalkState],
+  );
+
+  // マイクを開く直前に、話す先(個別の期限・参加者属性・受信許可)がサーバーに反映済みかを
+  // 確かめる(true=このまま話してよい)。反映済みなら待たない(ふだんの送信は待ち時間なし)。
+  // 個別の期限が押した時刻(pressedAt)で過ぎていれば、全員(ルーム)に戻して、その反映を
+  // 待ってから話す。押した時に時間内だった個別は、ここで期限を過ぎていても戻さない。
+  // 反映待ちはサーバーからの通知で進む(Android のロック中もタイマーに頼らない)。
+  // maxWaitMs の上限は補助なので、呼び出し側でも押してからの経過時間(Date.now())を確かめること。
+  const prepareTalk = useCallback(
+    async (label: string, maxWaitMs: number, pressedAt: number): Promise<boolean> => {
+      expireDmIfDue(label, pressedAt);
+      const room = roomRef.current;
+      if (!room) return false;
+      if (isTalkReady(room)) return true;
+      logDebug(`${label}: 話す先(${desiredTalk()})の反映を待つ`);
+      traceMark("話す先の反映待ち");
+      await withTimeout(syncTalkState(), maxWaitMs, false);
+      const ready = roomRef.current === room && isTalkReady(room);
+      logDebug(
+        `${label}: 話す先の反映${ready ? "完了" : "が間に合わない"}${
+          !ready && roomRef.current === room && !canSetAttributes(room)
+            ? "(属性を更新できない接続のため「全体」あて以外は送らない)"
+            : ""
+        }`,
+      );
+      if (ready) traceMark("話す先の反映");
+      return ready;
+    },
+    [desiredTalk, expireDmIfDue, isTalkReady, logDebug, syncTalkState, traceMark],
+  );
+
+  // 個別の相手が退出した時の処理(後で定義する。接続処理のイベントから呼ぶため ref 経由)。
+  const dmTargetLeftRef = useRef<(identity: string, why: string) => void>(() => {});
+
   const cleanup = useCallback(async () => {
     clearAutoOff();
     try {
@@ -906,12 +1761,19 @@ export default function App() {
       // noop
     }
     roomRef.current = null;
+    micTrackRef.current = null;
+    // 受信許可・送信中の話す先は接続ごと(新しい接続は「全員に受信を許可」から始まる)。
+    // 個別に話す相手は残す(接続し直した後も、相手がいれば個別のまま。いなければ全員に戻す)。
+    permTargetRef.current = null;
+    micOpenTalkRef.current = null;
     // 音声セッションの有効化/無効化は、上のエンジン連動処理(WebRTCの録音/再生
     // ON・OFFに追従)とPushToTalkに一本化しているため、ここでは手動で止めない
     // (手動でも止めると二重制御になり、PTT起動時などに活性化が失敗する原因になる)。
     setConnected(false);
     setMicOn(false);
+    activeSpeakersRef.current = [];
     setRemoteSpeakers([]);
+    setPeople([]);
   }, [clearAutoOff]);
 
   const connect = useCallback((): Promise<boolean> => {
@@ -942,7 +1804,8 @@ export default function App() {
         return true;
       };
       const displayName = identityRef.current.trim();
-      const room = roomIdRef.current;
+      // 音声サーバーのルームは全員共通。聞くルーム・話す先は接続後に参加者属性で知らせる。
+      const room = SHARED_ROOM;
       if (displayName.length === 0) {
         logDebug("connect: スタッフ名が未入力のため中止");
         setError("スタッフ名を入力してください");
@@ -958,7 +1821,9 @@ export default function App() {
         );
         return false;
       }
-      logDebug(`connect: 開始(${displayName} / ${room})`);
+      logDebug(
+        `connect: 開始(${displayName} / 聞く=${listenRef.current.join(",")} 話す=${desiredTalk()})`,
+      );
       setError(null);
       setConnecting(true);
       try {
@@ -993,12 +1858,17 @@ export default function App() {
           console.warn("audio route config skipped", audioConfigError);
         }
 
-        const data = await fetchToken({
+        // 発行から6時間以内の同じ条件のトークンがあれば使い回す(通信を1往復省く)。
+        const data = await getLiveKitToken({
           identity: buildIdentity(displayName, getDeviceTag()),
           name: displayName,
           room,
         });
-        logDebug(`connect: トークン取得OK(+${Date.now() - startedAt}ms)`);
+        logDebug(
+          data.reusedAgeMs === null
+            ? `connect: トークン取得OK(+${Date.now() - startedAt}ms)`
+            : `connect: トークン再利用(発行から${Math.round(data.reusedAgeMs / 60_000)}分)(+${Date.now() - startedAt}ms)`,
+        );
         if (await abandoned()) return false;
 
         const lkRoom = new Room();
@@ -1014,7 +1884,9 @@ export default function App() {
           logDebug(`room: 切断(${reasonName})`);
           setConnected(false);
           setMicOn(false);
+          activeSpeakersRef.current = [];
           setRemoteSpeakers([]);
+          setPeople([]);
           // 自分で切った場合(退勤・再接続のための作り直し)は何も表示しない。
           if (reason === DisconnectReason.CLIENT_INITIATED) return;
           if (reason === DisconnectReason.DUPLICATE_IDENTITY) {
@@ -1056,22 +1928,101 @@ export default function App() {
         // サーバーが実際に計測した「自分の声の音量」。これが記録されれば、
         // 音声が確実にサーバーまで届いている証拠になる(ローカルの状態だけでは分からない)。
         // あわせて、今話している他のスタッフの名前を画面に出す。
+        // サーバーの音声検出は共通ルームの全員分が届く(購読と無関係)ので、自分に聞こえる人
+        // (話す先が自分の聞くルーム・全体・自分あての個別)だけを出す。
         lkRoom.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
           if (roomRef.current !== lkRoom) return;
-          const localSid = lkRoom.localParticipant.sid;
-          const me = speakers.find((s) => s.sid === localSid);
+          const lp = lkRoom.localParticipant;
+          const me = speakers.find((s) => s.sid === lp.sid);
           if (me) {
             logDebug(`サーバー計測: 自分の音声を検出 level=${me.audioLevel.toFixed(3)}`);
           }
-          const others = speakers.filter((s) => s.sid !== localSid).map(displayNameOf);
-          setRemoteSpeakers((prev) =>
-            prev.length === others.length && prev.every((n, i) => n === others[i]) ? prev : others,
-          );
+          activeSpeakersRef.current = speakers;
+          refreshSpeakers(lkRoom);
         });
 
-        await lkRoom.connect(data.url, data.token);
+        // ---- 共通ルームで「誰の声を聞くか」 ----
+        // 自動購読は使わず(autoSubscribe:false)、相手の話す先と自分の聞くルームから1人ずつ
+        // 購読を決める。話す先は話し始める前に変わる(変更はまれ)ので、購読は相手が話す前に
+        // 済んでおり、受信の遅れは増えない。
+        lkRoom.on(RoomEvent.ParticipantConnected, (p) => {
+          if (roomRef.current !== lkRoom) return;
+          applySubscription(lkRoom, p);
+          refreshPeople(lkRoom);
+        });
+        lkRoom.on(RoomEvent.TrackPublished, (pub, p) => {
+          if (roomRef.current !== lkRoom) return;
+          if (pub.source === Track.Source.Microphone) applySubscription(lkRoom, p);
+        });
+        lkRoom.on(RoomEvent.ParticipantAttributesChanged, (_changed, p) => {
+          if (roomRef.current !== lkRoom) return;
+          if (p.isLocal) {
+            // 自分の属性がサーバー側で変わった(反映の通知・完全な再接続で消えた等)。
+            // 希望の値と違えば送り直す。
+            applyAllSubscriptions(lkRoom);
+            requestTalkSync();
+            return;
+          }
+          applySubscription(lkRoom, p as RemoteParticipant);
+          refreshPeople(lkRoom);
+          // 話している最中に話す先が変わった人の表示(聞こえる・聞こえない・個別)を出し直す。
+          refreshSpeakers(lkRoom);
+        });
+        lkRoom.on(RoomEvent.ParticipantDisconnected, (p) => {
+          if (roomRef.current !== lkRoom) return;
+          refreshPeople(lkRoom);
+          if (dmTargetRef.current?.identity !== p.identity) return;
+          // 完全な再接続の始まりにも、全員分の「退出」が先に届く(直後に同期的に再接続中になる)。
+          // マイクロタスクで状態を確かめてから判断する(タイマーを使わないのでロック中も進む)。
+          void Promise.resolve().then(() => {
+            if (roomRef.current !== lkRoom) return;
+            if (lkRoom.state !== ConnectionState.Connected) return; // 再接続中は Reconnected で確かめる
+            if (lkRoom.remoteParticipants.has(p.identity)) return;
+            dmTargetLeftRef.current(p.identity, "退出の通知");
+          });
+        });
+        lkRoom.on(RoomEvent.Reconnected, () => {
+          if (roomRef.current !== lkRoom) return;
+          // 完全な再接続では購読が外れ、自分の属性も消えている。全員分を決め直し、属性を送り直す
+          // (受信許可は LiveKit が送り直す)。
+          logDebug("room: 再接続完了(購読・話す先を確かめ直す)");
+          applyAllSubscriptions(lkRoom);
+          refreshPeople(lkRoom);
+          requestTalkSync();
+          const dm = dmTargetRef.current;
+          if (dm && !lkRoom.remoteParticipants.has(dm.identity)) {
+            dmTargetLeftRef.current(dm.identity, "再接続後に見当たらない");
+          }
+        });
+        lkRoom.on(RoomEvent.TrackSubscriptionFailed, (trackSid, p, reason) => {
+          if (roomRef.current !== lkRoom) return;
+          logDebug(`購読失敗: ${displayNameOf(p)} ${trackSid} ${String(reason ?? "")}`);
+        });
+
+        await lkRoom.connect(data.url, data.token, { autoSubscribe: false });
         logDebug(`connect: room.connect完了(+${Date.now() - startedAt}ms)`);
         if (await abandoned()) return false;
+        // 新しい接続は「全員に受信を許可」から始まる(cleanup で記録も戻してある)。
+        // 個別の設定中なら、マイクの準備(公開)より先に相手だけに絞る(下の反映の最初に行う。
+        // 通知は送った順にサーバーに届く)。相手がもういなければ全員(ルーム)に戻す。
+        const dmNow = dmTargetRef.current;
+        if (dmNow && !lkRoom.remoteParticipants.has(dmNow.identity)) {
+          dmTargetLeftRef.current(dmNow.identity, "接続し直した時にいなかった");
+        }
+        logDebug(
+          `connect: 属性の更新権限=${String(lkRoom.localParticipant.permissions?.canUpdateMetadata ?? "不明")} 他の参加者${lkRoom.remoteParticipants.size}人`,
+        );
+        if (!canSetAttributes(lkRoom)) {
+          // サーバーの更新前に発行されたトークン(属性の更新の許可なし)。この接続では「全体」あて
+          // しか話せないので、次に接続し直す時は必ず取り直す(使い回さない)。
+          clearTokenCache();
+          logDebug("connect: 属性を更新できないトークンのため、使い回し用のトークンを捨てた");
+        }
+        // 接続前から居た人には ParticipantConnected/TrackPublished が来ないので、ここで全員分を決める。
+        applyAllSubscriptions(lkRoom);
+        refreshPeople(lkRoom);
+        // 聞くルーム・話す先を知らせる(反映は待たない。送信の直前に確かめる)。
+        void syncTalkState();
         // マイクエンジンの「ウォームアップ」: setMicrophoneEnabledは初回のみ
         // createTracks()+publishTrack()という重い処理を行い、2回目以降は
         // track.mute()/unmute()という軽い処理になる(ライブラリの内部実装)。
@@ -1083,6 +2034,8 @@ export default function App() {
         await lkRoom.localParticipant.setMicrophoneEnabled(false);
         logDebug("connect: マイクウォームアップ完了");
         if (await abandoned()) return false;
+        micTrackRef.current =
+          lkRoom.localParticipant.getTrackPublication(Track.Source.Microphone)?.track ?? null;
         established = true;
         setConnected(true);
         setMicOn(false);
@@ -1092,12 +2045,15 @@ export default function App() {
         // 次回起動時(バックグラウンド再起動を含む)に同じ名前・ルームで入れるよう保存。
         writeSettings({
           [SETTINGS_KEYS.displayName]: displayName,
-          [SETTINGS_KEYS.room]: room,
+          [SETTINGS_KEYS.room]: talkChannelRef.current,
+          [SETTINGS_KEYS.listen]: serializeListen(listenRef.current),
         });
         setNameMissing(false);
         return true;
       } catch (e) {
         logDebug(`connect: エラー ${errMsg(e)}`);
+        // 使い回したトークンが原因の可能性もあるので、次の接続では必ず取り直す。
+        clearTokenCache();
         // 退勤による中止なら、エラーは出さない(後から始まった接続も壊さない)。
         if (await abandoned()) return false;
         await cleanup();
@@ -1116,7 +2072,17 @@ export default function App() {
 
     connectPromiseRef.current = attempt;
     return attempt;
-  }, [cleanup, logDebug]);
+  }, [
+    applyAllSubscriptions,
+    applySubscription,
+    cleanup,
+    desiredTalk,
+    logDebug,
+    refreshPeople,
+    refreshSpeakers,
+    requestTalkSync,
+    syncTalkState,
+  ]);
 
   // マイクの実測統計(WebRTC統計)を診断ログに出す。「マイクが実際に音を拾えて
   // いるか(音量/累積エネルギー)」と「サーバーへパケットを送れているか」を
@@ -1168,58 +2134,222 @@ export default function App() {
     [logDebug],
   );
 
+  // マイクを閉じ終えた後の処理: 個別で話していたなら自動で戻すまでの時間をここから数え直し、
+  // 送信中に後回しにした話す先・聞くルームの変更や個別の期限を反映する。
+  const afterMicClosed = useCallback(
+    (endedTalk: string | null) => {
+      const dm = dmTargetRef.current;
+      if (endedTalk !== null && dm && endedTalk === dmTalk(dm.identity)) {
+        const endedAt = Date.now();
+        dmSinceRef.current = endedAt;
+        setDmSince(endedAt);
+      }
+      checkDmExpiry();
+      if (channelsPrunePendingRef.current) channelsPruneRef.current("送信中に後回しにした整理");
+      requestTalkSync();
+    },
+    [checkDmExpiry, requestTalkSync],
+  );
+  // マイクのON/OFF。戻り値は切替が完了したか(失敗・接続なしは false)。
+  const micOpSeqRef = useRef(0);
   const setMic = useCallback(
-    async (on: boolean) => {
+    async (on: boolean): Promise<boolean> => {
+      // 呼び出しの順番(閉じ終えた時、後から「開く」が呼ばれていれば話す先の記録を消さない)。
+      const seq = ++micOpSeqRef.current;
       const room = roomRef.current;
       if (!room) {
         logDebug(`setMic(${on}): roomなしのため無視`);
         // トグル側が先に記録した「意図」を実態(OFF)に戻す(次の押下が空振りしないように)。
         micOnRef.current = false;
-        return;
+        return false;
       }
       try {
+        if (!on) {
+          // 止める時は、まずトラックを直接ミュートする(この時点で声は送られなくなる)。
+          // LiveKit が完全な再接続の後で音声を公開し直している最中は、
+          // setMicrophoneEnabled(false) がその完了を待つため、それまでマイクが
+          // 開いたままになってしまう。公開し直しの途中は一覧に無いので、覚えておいた
+          // トラックも使う。
+          const track =
+            room.localParticipant.getTrackPublication(Track.Source.Microphone)?.track ??
+            micTrackRef.current;
+          if (track && !track.isMuted) {
+            track.mute().catch((e: unknown) => {
+              logDebug(`setMic(false): 先行ミュートに失敗 ${errMsg(e)}`);
+            });
+          }
+        } else if (micOpenTalkRef.current === null) {
+          // この送信の話す先を記録する(閉じ終えるまで話す先・受信許可を変えない)。
+          // 個別の受信許可(相手だけ)が出ていれば、それを優先して記録する(狭い方に倒す)。
+          micOpenTalkRef.current =
+            permTargetRef.current !== null
+              ? dmTalk(permTargetRef.current)
+              : room.localParticipant.attributes[ATTR.talk] || BROADCAST_CHANNEL;
+        }
         // ミュート解除後の録音再開は、AudioDeviceModuleのミュートモードを
         // RestartEngine(アプリ起動時に設定)にすることでエンジンごと再起動させる。
         // トラックのrestartTrack()では直らないことを実測で確認済み
         // (トラック層ではなくエンジン層の問題のため)。
         await room.localParticipant.setMicrophoneEnabled(on);
         setMicOn(on);
-        logDebug(`setMic(${on}): 完了`);
+        logDebug(`setMic(${on}): 完了${on ? `(話す先=${micOpenTalkRef.current ?? "?"})` : ""}`);
         if (on) {
           // 送信ONの2秒後に実測統計を自動で記録(押している間に計測される)。
           setTimeout(() => {
             void logMicStats("ON+2秒");
           }, 2000);
         }
-        if (!on) clearAutoOff();
+        if (!on) {
+          clearAutoOff();
+          // 閉じ終えたので、送信中に後回しにした話す先の変更・個別の期限をここで反映する
+          // (閉じている途中に次の「開く」が呼ばれていたら、その送信の記録なので残す)。
+          if (micOpSeqRef.current === seq) {
+            const endedTalk = micOpenTalkRef.current;
+            micOpenTalkRef.current = null;
+            afterMicClosed(endedTalk);
+          }
+        }
+        return true;
       } catch (e) {
         logDebug(`setMic(${on}): エラー ${errMsg(e)}`);
         // 切替に失敗したら、トグル側が先に記録した「意図」を実態に戻す。
         micOnRef.current = room.localParticipant.isMicrophoneEnabled;
+        // 開けなかったなら、話す先の記録も消す(閉じられなかった時は残す=話す先を変えない)。
+        if (on && micOpSeqRef.current === seq && !room.localParticipant.isMicrophoneEnabled) {
+          micOpenTalkRef.current = null;
+        }
         showError(e, "マイクを操作できませんでした");
+        return false;
       }
     },
-    [clearAutoOff, logDebug, logMicStats],
+    [afterMicClosed, clearAutoOff, logDebug, logMicStats],
+  );
+
+  // どの経路の送信も止める(個別の相手が退出した時など)。止める方向なので声は漏れない。
+  // 開始の確定待ち・話す先の反映待ちの送信も取り消す(遅れて始まらないように)。
+  const stopAllTransmission = useCallback(
+    (reason: string) => {
+      const pttOwned =
+        txActiveRef.current ||
+        bleTxIntentRef.current ||
+        bleToggleInitiatedRef.current ||
+        screenHoldRef.current ||
+        nativePttTransmitting();
+      logDebug(`送信を停止(${reason})`);
+      txGenRef.current += 1;
+      directTxGenRef.current += 1;
+      txActiveRef.current = false;
+      bleTxIntentRef.current = false;
+      bleDirectActiveRef.current = false;
+      bleBeginAfterEndRef.current = null;
+      // 画面のボタンを押したままでも、遅れて届いた送信開始の確定はすぐ終了させる(handleBegin)。
+      screenHoldRef.current = false;
+      micOnRef.current = false;
+      clearAutoOff();
+      if (pttOwned) {
+        PttChannel?.endTransmitting().catch((e) => {
+          logDebug(`送信の停止に失敗 ${errMsg(e)}`);
+        });
+      }
+      void setMic(false);
+    },
+    [clearAutoOff, logDebug, setMic],
+  );
+
+  // 個別の相手が退出した: すぐ全員(ルーム)に戻す。相手あてに送信中なら送信も止める
+  // (相手がいないので誰にも届かず、送信中は話す先を変えられないため。止めずに
+  // ルームあてに切り替えると、個別のつもりの話が全員に聞こえてしまう)。
+  const handleDmTargetLeft = useCallback(
+    (identity: string, why: string) => {
+      const dm = dmTargetRef.current;
+      if (!dm || dm.identity !== identity) return;
+      const wasTransmitting = isTransmittingNow();
+      clearDmState();
+      logDebug(`個別: 相手(${dm.name})が退出したため全員(ルーム)に戻す(${why})`);
+      if (wasTransmitting) stopAllTransmission("個別の相手が退出");
+      setNotice(
+        `個別に話していた${dm.name}さんが退出したため、${
+          wasTransmitting ? "送信を止めて、" : ""
+        }話す先を「${roomTalkLabel()}」に戻しました`,
+      );
+      requestTalkSync();
+    },
+    [clearDmState, isTransmittingNow, logDebug, requestTalkSync, roomTalkLabel, stopAllTransmission],
+  );
+  useEffect(() => {
+    dmTargetLeftRef.current = handleDmTargetLeft;
+  }, [handleDmTargetLeft]);
+
+  // 直接経路でマイクを開く(話す先の反映を確かめてから)。stillWanted は反映を待った後に
+  // 「まだ話すつもりか」を確かめる関数(離された・押し直された・止められたら false)。
+  // 反映済みなら待たない。待ちが長引いた(押してから TALK_READY_WAIT_MS 超)時は開かない
+  // (Android のロック中は上限のタイマーが動かないので、経過時間で判断する。忘れた頃に
+  // 送信が始まる事故の防止)。戻り値はマイクを開いたか。
+  const openMicDirect = useCallback(
+    async (label: string, pressedAt: number, stillWanted: () => boolean): Promise<boolean> => {
+      directOpeningRef.current += 1;
+      try {
+        const ready = await prepareTalk(label, TALK_READY_WAIT_MS, pressedAt);
+        if (!stillWanted() || clockedOutRef.current) {
+          logDebug(`${label}: 話す先の反映を待つ間に止められたため送信しない`);
+          return false;
+        }
+        if (!ready || Date.now() - pressedAt > TALK_READY_WAIT_MS) {
+          logDebug(`${label}: 話す先を切り替えられないため送信しない`);
+          setError(
+            "話す先の切り替えが完了しなかったため、送信しませんでした。もう一度押してください",
+          );
+          return false;
+        }
+        return await setMic(true);
+      } finally {
+        directOpeningRef.current -= 1;
+        // 開かずに終わった時は、待っている間に止めていた個別の自動解除を確かめ直す。
+        if (directOpeningRef.current === 0 && micOpenTalkRef.current === null) checkDmExpiry();
+      }
+    },
+    [checkDmExpiry, logDebug, prepareTalk, setError, setMic],
   );
 
   // タップ/ハードボタン用トグル: ONにしたら AUTO_OFF_MS で自動OFF。
   // (Android のロック中も止まるよう、自動OFFは armAutoOff でネイティブのタイマーも使う)
-  const toggleMic = useCallback((autoOffMs: number = AUTO_OFF_MS) => {
+  // 戻り値はマイクの切替が完了したか(所要時間の記録用)。
+  const toggleMic = useCallback((autoOffMs: number = AUTO_OFF_MS): Promise<boolean> => {
     const next = !micOnRef.current;
     // 意図をすぐ記録する。micOnRef は送信の切替が終わってから更新されるため、
     // その間の2度目の押下が「停止」でなく「再開始」になってしまうのを防ぐ。
     micOnRef.current = next;
-    void setMic(next);
+    const gen = ++directTxGenRef.current;
     clearAutoOff();
-    if (next) {
-      armAutoOff(autoOffMs, () => {
-        logDebug("自動停止(切り忘れ防止)");
+    if (!next) return setMic(false);
+    armAutoOff(autoOffMs, () => {
+      logDebug("自動停止(切り忘れ防止)");
+      micOnRef.current = false;
+      directTxGenRef.current += 1;
+      void setMic(false);
+    });
+    return (async () => {
+      const opened = await openMicDirect(
+        "送信",
+        Date.now(),
+        () => directTxGenRef.current === gen && micOnRef.current,
+      );
+      if (!opened && directTxGenRef.current === gen) {
+        // 開けなかった。意図を実態(OFF)に戻す(次の押下がまた「開始」になる)。念のため
+        // 閉じ直す(閉じ終えると自動停止の予約も消える)。
         micOnRef.current = false;
-        void setMic(false);
-      });
-    }
-  }, [armAutoOff, clearAutoOff, logDebug, setMic]);
+        await setMic(false);
+      }
+      return opened;
+    })();
+  }, [armAutoOff, clearAutoOff, logDebug, openMicDirect, setMic]);
 
+
+  // PTTのシステム音声セッション(AVAudioSession)が今有効か。ネイティブの状態を優先する。
+  const pttAudioActiveNow = useCallback(
+    (): boolean => nativePttAudioActive() ?? audioActiveRef.current,
+    [],
+  );
 
   // PTTのシステム音声セッション(AVAudioSession)が実際に有効になるまで待つ。
   // 実機ログで、待ち時間が700msだと間に合わず(onActivateAudioが1秒以上後に
@@ -1227,29 +2357,50 @@ export default function App() {
   // その場合、iOS側の録音エンジンがまだ起動していない状態でLiveKitがミュート
   // 解除するため、APIレベルでは成功に見えてもサーバーには音声が届かない。
   // 最大3秒まで待ち、戻り値で成否を呼び出し元に伝える。
-  const waitAudioActive = useCallback(async () => {
-    for (let i = 0; i < 60; i++) {
-      if (audioActiveRef.current) return true;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    return false;
-  }, []);
+  // 以前は50msごとに確かめていた(最大50msの遅れ)。今は onActivateAudio の通知で
+  // 即座に再開する。PTT送信中(iPhone)だけ使うので、上限のタイマーは確実に動く。
+  const waitAudioActive = useCallback((): Promise<boolean> => {
+    if (pttAudioActiveNow()) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      const waiters = audioActiveWaitersRef.current;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (ok: boolean) => {
+        if (!waiters.delete(onActive)) return;
+        if (timer) clearTimeout(timer);
+        resolve(ok);
+      };
+      const onActive = () => finish(true);
+      waiters.add(onActive);
+      timer = setTimeout(() => finish(pttAudioActiveNow()), AUDIO_ACTIVE_WAIT_MS);
+    });
+  }, [pttAudioActiveNow]);
 
   // PTT送信開始: Appleの設計では「待機中はアプリ休止 → 話す瞬間に起こされる」。
-  // 休止中にLiveKitが切断されていたら、まず高速再接続してから送信ONにする。
+  // 以前は休止明け(ハートビートの空白が8秒超)なら接続を信用せず毎回作り直していた
+  // (片付け→トークン取得→接続→マイクの準備で1.5〜4秒。ロック中の押下はほぼ毎回
+  // これになり、「押してから話せるまで2〜3秒」の主な原因だった)。
+  // 今は LiveKit の実際の状態(linkHealth)を見て、本当に切れている時だけ作り直す。
+  // 休止明けで LiveKit が切断を検知して自分で復旧している最中なら、その完了を待つ
+  // (同じトラック・トークンのまま戻るので、作り直すより速い)。
+  // 確認は「音声セッションの有効化(システム側で0.3〜1.2秒)を待った後」にも行う。
+  // 休止明けの切断は、その間に LiveKit 自身が検知しているため。
   // 重要: 各段階で「まだ押されているか(txActiveRef)」を確認し、
-  // 離された後にマイクONが発動する事故(ホットマイク)を防ぐ。
-  const pttTransmitStart = useCallback(async () => {
+  // 離された後にマイクONが発動する事故(ホットマイク)を防ぐ。マイクを開くのは
+  // 音声セッションが有効になってから(onActivateAudio の後)だけ。
+  // pressedAt は押した時刻(個別の期限の判断に使う。イヤホン・ロック画面のトークボタンは確定の時刻)。
+  const pttTransmitStart = useCallback(async (pressedAt: number) => {
     txActiveRef.current = true;
     const gen = ++txGenRef.current;
+    const startedAt = Date.now();
+    // 接続の作り直し・LiveKit の復旧待ちにかけてよい時間の上限(この送信全体で)。
+    const deadline = startedAt + RECONNECT_TIMEOUT_MS;
 
-    // JSが休止していた直後は、見かけ上「接続中」でも実際は切れていることがある。
-    // ハートビートの空白が大きければ接続を信用せず作り直す。
-    const staleMs = Date.now() - lastAliveRef.current;
-    const suspectedStale = staleMs > 8000;
+    // gap はアプリが休止していた時間の目安(診断用。判定には使わない)。
+    const gapMs = startedAt - lastAliveRef.current;
     const room = roomRef.current;
+    const health = linkHealth(room);
     logDebug(
-      `PTT開始要求: stale=${staleMs}ms room.state=${room?.state ?? "なし"} suspectedStale=${suspectedStale}`,
+      `PTT開始要求: 接続=${health} room.state=${room?.state ?? "なし"} 休止=${gapMs}ms rtt=${signalRtt(room)}ms`,
     );
 
     // 後から新しい送信が始まっていたら、この処理はもう何もしない(新しい送信の
@@ -1261,6 +2412,7 @@ export default function App() {
     // 「送信中」のまま残る(ロック中のユーザーは無音送信に気づけない)。
     const abortTransmit = async (reason: string) => {
       logDebug(`PTT: 中断(${reason}) → システム送信を終了`);
+      traceEnd(`中断: ${reason}`);
       txActiveRef.current = false;
       try {
         await PttChannel?.endTransmitting();
@@ -1268,71 +2420,123 @@ export default function App() {
         // noop
       }
     };
+    // 新しい送信に置き換わった、または離された(=もう続けない)か。
+    const stopped = (during: string): boolean => {
+      if (superseded()) return true;
+      if (txActiveRef.current) return false;
+      logDebug(`PTT: ${during}中に離された`);
+      traceEnd("離された");
+      return true;
+    };
+    // どの経路でマイクを開いたか(診断用)。
+    let path = "高速";
+    // 話せる接続を用意する。false = 中断済み・もう不要(呼び出し元はそのまま終わる)。
+    const ensureLink = async (): Promise<boolean> => {
+      let current = roomRef.current;
+      let h = linkHealth(current);
+      if (h === "resuming" && current) {
+        path = "復旧待ち";
+        logDebug("PTT: LiveKitが自動で復旧中 → 完了を待つ");
+        traceMark("復旧待ち");
+        const outcome = await waitRoomRecovery(
+          current,
+          Math.min(LINK_RECOVERY_WAIT_MS, deadline - Date.now()),
+        );
+        logDebug(`PTT: 復旧待ちの結果=${outcome}`);
+        if (stopped("復旧待ち")) return false;
+        if (outcome === "reconnected") {
+          traceMark("復旧");
+          return true;
+        }
+        current = roomRef.current;
+        h = linkHealth(current);
+      }
+      if (h === "ok") return true;
+      path = "再接続";
+      logDebug("PTT: 再接続経路");
+      traceMark("再接続開始");
+      const remain = deadline - Date.now();
+      let result: boolean | "timeout" = "timeout";
+      if (remain > 0) {
+        let raceTimer: ReturnType<typeof setTimeout> | undefined;
+        result = await Promise.race([
+          connect(),
+          new Promise<"timeout">((resolve) => {
+            raceTimer = setTimeout(() => resolve("timeout"), remain);
+          }),
+        ]);
+        if (raceTimer) clearTimeout(raceTimer);
+      }
+      if (superseded()) return false;
+      if (result === "timeout") {
+        // この送信は諦めてシステムの「送信中」表示を消す(無音のまま送信中が
+        // 続くのを防ぐ)。
+        await abortTransmit("再接続タイムアウト");
+        return false;
+      }
+      logDebug(`PTT: connect結果=${result}`);
+      if (!result) {
+        await abortTransmit("再接続失敗");
+        return false;
+      }
+      traceMark("再接続完了");
+      return !stopped("再接続");
+    };
 
-    if (!suspectedStale && room && room.state === ConnectionState.Connected) {
-      logDebug("PTT: 高速経路(再接続なし)");
-      const activated = await waitAudioActive();
-      logDebug(`PTT: audioActive待ち完了(activated=${activated})`);
-      if (superseded()) return;
-      if (!txActiveRef.current) {
-        logDebug("PTT: audioActive待ち中に離された");
-        return;
-      }
-      if (!activated) {
-        await abortTransmit("音声セッション未有効=録音できない状態");
-        return;
-      }
-      await setMic(true);
-      if (!txActiveRef.current) {
-        logDebug("PTT: setMic中に離されたため再OFF");
-        await setMic(false);
-      }
-      return;
-    }
+    // 話す先の反映(個別の期限切れの確認を含む)を、音声セッションの有効化を待つ間に進めておく
+    // (イヤホン・ロック画面のトークボタンで始まった送信は、ここが最初の確認になる)。
+    kickTalkSync("PTT", pressedAt);
 
-    logDebug("PTT: 再接続経路");
-    let raceTimer: ReturnType<typeof setTimeout> | undefined;
-    const result = await Promise.race([
-      connect(),
-      new Promise<"timeout">((resolve) => {
-        raceTimer = setTimeout(() => resolve("timeout"), RECONNECT_TIMEOUT_MS);
-      }),
-    ]);
-    if (raceTimer) clearTimeout(raceTimer);
-    if (superseded()) return;
-    if (result === "timeout") {
-      // この送信は諦めてシステムの「送信中」表示を消す(無音のまま送信中が
-      // 続くのを防ぐ)。
-      await abortTransmit("再接続タイムアウト");
-      return;
-    }
-    const ok = result;
-    logDebug(`PTT: connect結果=${ok}`);
-    if (!ok) {
-      await abortTransmit("再接続失敗");
-      return;
-    }
-    if (!txActiveRef.current) {
-      logDebug("PTT: 再接続中に離された");
-      return;
-    }
+    // 接続が無い・完全に切れている時は、すぐに作り直す(音声セッションの有効化は
+    // その間にシステムが並行して進める)。
+    if (health === "dead" && !(await ensureLink())) return;
+
     const activated = await waitAudioActive();
     logDebug(`PTT: audioActive待ち完了(activated=${activated})`);
-    if (superseded()) return;
-    if (!txActiveRef.current) {
-      logDebug("PTT: audioActive待ち中に離された");
-      return;
-    }
+    if (stopped("audioActive待ち")) return;
     if (!activated) {
       await abortTransmit("音声セッション未有効=録音できない状態");
       return;
     }
-    await setMic(true);
+    // マイクを開く直前にもう一度確かめる(待っている間に切断が検知されていれば、
+    // ここで復旧を待つか作り直す)。
+    if (!(await ensureLink())) return;
+    // 話す先(個別の期限・参加者属性・個別の受信許可)がサーバーに反映済みかを確かめる。
+    // ふだんは反映済みで待たない。個別の期限切れ・接続し直しの直後だけ反映を待つ。
+    const talkReady = await prepareTalk(
+      "PTT",
+      Math.min(TALK_READY_WAIT_MS, Math.max(0, deadline - Date.now())),
+      pressedAt,
+    );
+    if (stopped("話す先の反映待ち")) return;
+    if (!talkReady) {
+      await abortTransmit("話す先を切り替えられない");
+      setError("話す先の切り替えが完了しなかったため、送信しませんでした。もう一度押してください");
+      return;
+    }
+    if (path === "高速") logDebug("PTT: 高速経路(再接続なし)");
+    const opened = await setMic(true);
+    if (opened) {
+      traceMark("マイクON");
+      traceEnd(`経路=${path}・休止${Math.round(gapMs / 1000)}秒`);
+    } else {
+      traceEnd("マイクON失敗");
+    }
     if (!txActiveRef.current) {
       logDebug("PTT: setMic中に離されたため再OFF");
       await setMic(false);
     }
-  }, [connect, logDebug, setMic, waitAudioActive]);
+  }, [
+    connect,
+    kickTalkSync,
+    logDebug,
+    prepareTalk,
+    setError,
+    setMic,
+    traceEnd,
+    traceMark,
+    waitAudioActive,
+  ]);
 
   const pttTransmitEnd = useCallback(async () => {
     logDebug("PTT: 終了要求");
@@ -1348,12 +2552,33 @@ export default function App() {
     // 送信の引き継ぎの両方から呼ぶ)。
     const handleBegin = (source: string) => {
       logDebug(`PTT送信開始: ${source}`);
+      // 押した時刻(個別の期限の判断用)。アプリが要求した送信は押下の時刻、それ以外
+      // (イヤホン・ロック画面のトークボタン・起動時の引き継ぎ)はこの確定の時刻。
+      const beganAt = Date.now();
+      const requestedAt = pressAtRef.current;
+      pressAtRef.current = 0;
+      const pressedAt =
+        source === PTT_SOURCE.app &&
+        requestedAt > 0 &&
+        requestedAt <= beganAt &&
+        beganAt - requestedAt < PRESS_TIME_MAX_AGE_MS
+          ? requestedAt
+          : beganAt;
+      // 所要時間の記録: アプリが要求した送信(押下の記録あり)なら「開始確定」を足す。
+      // イヤホン・ロック画面のトークボタンは、ここが起点になる。
+      const trace = txTraceRef.current;
+      if (source === PTT_SOURCE.app && trace && Date.now() - trace.t0 < TX_TRACE_MAX_MS) {
+        traceMark("開始確定");
+      } else {
+        traceStart(`開始確定(${source})`, Date.now());
+      }
       // 確定が届いたので、BLEボタンの「確定待ち」の見張りは不要。
       clearBleBeginWatchdog();
       // 退勤済みなのにチャンネルが残っていた(退出がシステムに拒否された等)。
       // 再接続も送信もせずに止め、退出をやり直す(帰宅後の誤送信を防ぐ)。
       if (clockedOutRef.current) {
         logDebug("PTT: 退勤済みのため送信しない → 退出をやり直す");
+        traceEnd("退勤済み");
         void PttChannel?.endTransmitting();
         void PttChannel?.leave().catch(() => {});
         return;
@@ -1367,6 +2592,7 @@ export default function App() {
         !bleTxIntentRef.current
       ) {
         logDebug("PTT: 開始確定時には既に離されていた/取り消し済み → 即終了");
+        traceEnd("確定時には離されていた");
         bleToggleInitiatedRef.current = false;
         void PttChannel?.endTransmitting();
         return;
@@ -1400,7 +2626,7 @@ export default function App() {
           void setMic(false);
         }, limitMs);
       }
-      void pttTransmitStart();
+      void pttTransmitStart(pressedAt);
     };
 
     const subs = [
@@ -1449,12 +2675,17 @@ export default function App() {
         logDebug(
           `BLEボタン: 前の送信の終了を確認 → PTT送信開始(${pending.mode === "hold" ? "押している間だけ" : "押すたびON/OFF"})`,
         );
+        traceStart("BLE押下(終了待ち)", pending.at);
+        pressAtRef.current = pending.at;
+        kickTalkSync("BLEボタン", pending.at);
+        traceMark("開始要求");
         PttChannel?.beginTransmitting().catch((e) => {
           // 失敗したら意図もリセットする(離した時・次の押下で無関係な送信を止めないように)。
           bleTxIntentRef.current = false;
           bleToggleInitiatedRef.current = false;
           clearBleBeginWatchdog();
           logDebug(`BLEボタン: 開始失敗 ${errMsg(e)}`);
+          traceEnd("開始失敗");
         });
       }),
       PttChannel.addListener("onActivateAudio", () => {
@@ -1465,12 +2696,15 @@ export default function App() {
         // のdidActivate)で同期的に行うようにした。JS側からの
         // audioSessionDidActivate呼び出しは非同期でタイミングが遅れうる上、
         // 二重に有効化状態を操作すると不整合の原因になるため、ここでは
-        // 状態フラグの更新とマイクON待ちの解除のみを行う。
+        // 状態フラグの更新とマイクON待ち(waitAudioActive)の解除のみを行う。
+        // マイクを開くのは pttTransmitStart だけにする(以前はここでも開いていたが、
+        // 送信の世代の確認を通らず、作り直し中の接続に対して開くことがあった。
+        // 待っている側は通知と同時に再開するので、遅れは生じない)。
         logDebug("PTTイベント: onActivateAudio");
         audioActiveRef.current = true;
-        if (txActiveRef.current) {
-          void setMic(true);
-        }
+        traceMark("音声有効");
+        const waiters = [...audioActiveWaitersRef.current];
+        for (const resume of waiters) resume();
       }),
       PttChannel.addListener("onDeactivateAudio", () => {
         logDebug("PTTイベント: onDeactivateAudio");
@@ -1542,11 +2776,15 @@ export default function App() {
   }, [
     armBleBeginWatchdog,
     clearBleBeginWatchdog,
+    kickTalkSync,
     logDebug,
     pttTransmitStart,
     pttTransmitEnd,
     setMic,
     setError,
+    traceEnd,
+    traceMark,
+    traceStart,
   ]);
 
   // PTTチャンネルに参加/退出。
@@ -1667,6 +2905,8 @@ export default function App() {
     writeSettings({ [SETTINGS_KEYS.clockedOut]: "1" });
     logDebug("退勤: 開始");
     setError(null);
+    // 使い回し用のトークンも捨てる(次の出勤では必ず取り直す)。
+    clearTokenCache();
     wantConnectedRef.current = false;
     setShiftOn(false);
     txActiveRef.current = false;
@@ -1674,9 +2914,15 @@ export default function App() {
     bleToggleInitiatedRef.current = false;
     bleDirectActiveRef.current = false;
     bleBeginAfterEndRef.current = null;
+    // 話す先の反映を待っている直接経路の送信も取り消す(退勤後に開かないように)。
+    directTxGenRef.current += 1;
+    micOnRef.current = false;
     clearBleBeginWatchdog();
     stopBleTest();
     screenHoldRef.current = false;
+    // 個別に話す設定も終える(次の出勤は全員(ルーム)あてから始まる)。
+    clearDmState();
+    setNotice(null);
     if (bleTxAutoOffRef.current) {
       clearTimeout(bleTxAutoOffRef.current);
       bleTxAutoOffRef.current = null;
@@ -1715,7 +2961,7 @@ export default function App() {
       AudioSession.stopAudioSession().catch(() => {});
     }
     logDebug("退勤: 完了");
-  }, [cleanup, clearBleBeginWatchdog, logDebug, setError, stopBleTest]);
+  }, [cleanup, clearBleBeginWatchdog, clearDmState, logDebug, setError, stopBleTest]);
 
   // イヤホンが無い時の受信音の出力先を切り替える(設定は端末に保存)。
   // スピーカー: ポケットに入れたままでも聞こえる(既定)。
@@ -1748,12 +2994,225 @@ export default function App() {
     })();
   }, [logDebug]);
 
+  // ---- 聞くルーム・話す先・個別に話す(画面の操作) ----
+  // 聞くルーム・話す先を変えて保存する(出勤中は接続し直さず、参加者属性と購読だけ変える)。
+  // 話す先は聞くルームの中から選ぶ(聞いていないルームなら、聞くルームの先頭に戻す)。
+  const applyChannelPrefs = useCallback(
+    (nextListen: readonly string[], nextTalk: string, why: string) => {
+      const listenIds = normalizeListen(nextListen);
+      const talkId = pickTalkChannel(nextTalk, listenIds);
+      if (sameStrings(listenIds, listenRef.current) && talkId === talkChannelRef.current) return;
+      listenRef.current = listenIds;
+      talkChannelRef.current = talkId;
+      setListen(listenIds);
+      setTalkChannel(talkId);
+      writeSettings({
+        [SETTINGS_KEYS.listen]: serializeListen(listenIds),
+        [SETTINGS_KEYS.room]: talkId,
+      });
+      logDebug(`ルーム: ${why}(聞く=${listenIds.join(",")} 話す=${talkId})`);
+      const room = roomRef.current;
+      if (room) {
+        applyAllSubscriptions(room);
+        refreshSpeakers(room);
+        requestTalkSync();
+      }
+    },
+    [applyAllSubscriptions, logDebug, refreshSpeakers, requestTalkSync],
+  );
+
+  // ルーム一覧(サーバーから正しく読めたもの)に無くなったルームを、聞くルームから外す。
+  // 話す先のルームが無くなった時は、話す先を勝手に別のルーム・「全体」に変えない(広げると、
+  // そのルームの人だけに話すつもりの声が、ポケットの中のまま全員に届いてしまう)。話す先は
+  // そのまま(聞くルームにも残す)にして知らせ、本人に選び直してもらう。
+  // 送信中は聞くルームを変えないので、マイクを閉じ終えた時・次にルーム一覧を読む時にやり直す。
+  const pruneMissingChannels = useCallback(
+    (why: string) => {
+      if (!channelsFromServerRef.current) return;
+      if (isTransmittingNow()) {
+        if (!channelsPrunePendingRef.current) {
+          logDebug(`ルーム: 送信中のため、無くなったルームの整理は送信の後に行う(${why})`);
+        }
+        channelsPrunePendingRef.current = true;
+        return;
+      }
+      channelsPrunePendingRef.current = false;
+      const ids = channelsRef.current.map((c) => c.id);
+      const talk = talkChannelRef.current;
+      const kept = listenRef.current.filter((id) => ids.includes(id) || id === talk);
+      if (kept.length !== listenRef.current.length) applyChannelPrefs(kept, talk, why);
+      if (ids.includes(talk)) {
+        missingTalkNotifiedRef.current = null;
+      } else if (missingTalkNotifiedRef.current !== talk) {
+        missingTalkNotifiedRef.current = talk;
+        logDebug(`ルーム: 話す先「${talk}」が一覧に無い → 話す先は変えずに知らせる`);
+        setNotice(
+          `話す先のルーム「${talk}」は管理画面で削除されました。話す先を選び直してください（選び直すまでは、ほかの人に声が届かないことがあります）`,
+        );
+      }
+    },
+    [applyChannelPrefs, isTransmittingNow, logDebug],
+  );
+  useEffect(() => {
+    channelsPruneRef.current = pruneMissingChannels;
+  }, [pruneMissingChannels]);
+
+  // 聞くルームの追加・解除(「全体」は常に聞くので外せない)。送信中は変えない。
+  const toggleListen = useCallback(
+    (id: string) => {
+      if (id === BROADCAST_CHANNEL || isTransmittingNow()) return;
+      const current = listenRef.current;
+      applyChannelPrefs(
+        current.includes(id) ? current.filter((x) => x !== id) : [...current, id],
+        talkChannelRef.current,
+        "聞くルームを変更",
+      );
+    },
+    [applyChannelPrefs, isTransmittingNow],
+  );
+
+  // 話す先のルームを選ぶ。個別に話す設定中なら、それを終えてこのルームに話す。送信中は変えない。
+  const chooseTalkChannel = useCallback(
+    (id: string) => {
+      if (isTransmittingNow()) return;
+      const dm = dmTargetRef.current;
+      if (dm) {
+        clearDmState();
+        logDebug(`個別: ルームを選んだため${dm.name}さんとの個別を終了`);
+        setNotice(null);
+      }
+      const current = listenRef.current;
+      applyChannelPrefs(current.includes(id) ? current : [...current, id], id, "話す先を変更");
+      // 無くなったルームを話す先にしていた場合は、選び直したので聞くルームからも外す。
+      pruneMissingChannels("無くなったルームの代わりに話す先を選んだ");
+      // 個別をやめただけ(ルームは同じ)の時も、サーバーに知らせる。
+      requestTalkSync();
+    },
+    [
+      applyChannelPrefs,
+      clearDmState,
+      isTransmittingNow,
+      logDebug,
+      pruneMissingChannels,
+      requestTalkSync,
+    ],
+  );
+
+  // 個別に話す相手を選ぶ(共通ルームにいる人だけ)。選んだ人だけに声が届く設定になる。
+  // 最後に話し終えてから DM_REVERT_MS(まだ話していなければ選んでから)で全員(ルーム)に戻る。
+  const selectDmTarget = useCallback(
+    (person: Person) => {
+      if (isTransmittingNow()) return;
+      const room = roomRef.current;
+      if (!room || !person.identity || !room.remoteParticipants.has(person.identity)) {
+        setNotice(`${person.name}さんは退出しています`);
+        if (room) refreshPeople(room);
+        return;
+      }
+      const target: DmTarget = { identity: person.identity, name: person.name };
+      const since = Date.now();
+      dmTargetRef.current = target;
+      setDmTarget(target);
+      dmSinceRef.current = since;
+      setDmSince(since);
+      setNowTick(since);
+      setNotice(null);
+      logDebug(`個別: ${person.name}さん(${person.identity})だけに話す設定にした`);
+      checkDmExpiry();
+      requestTalkSync();
+    },
+    [checkDmExpiry, isTransmittingNow, logDebug, refreshPeople, requestTalkSync],
+  );
+
+  // 「全員（ルーム）に戻す」ボタン。送信中は変えない。
+  const revertDmManually = useCallback(() => {
+    if (isTransmittingNow()) return;
+    revertDm("手動", null);
+    setNotice(null);
+  }, [isTransmittingNow, revertDm]);
+
+  // サーバーから読んだルーム一覧を反映して保存する。管理画面で消されたルームは、
+  // 聞くルームから外す(話す先は変えずに知らせる。pruneMissingChannels)。
+  // サーバーが保存先を読めなかった時は 503 になり、ここには来ない(保存済みの一覧のまま)。
+  const applyServerChannels = useCallback(
+    (list: ChannelItem[]) => {
+      const prev = channelsRef.current;
+      const same =
+        prev.length === list.length &&
+        prev.every(
+          (c, i) =>
+            c.id === list[i].id &&
+            c.label === list[i].label &&
+            c.description === list[i].description,
+        );
+      if (!same) {
+        channelsRef.current = list;
+        setChannels(list);
+        writeSettings({ [SETTINGS_KEYS.channels]: JSON.stringify(list) });
+      }
+      channelsFromServerRef.current = true;
+      pruneMissingChannels("管理画面で削除されたルームを外した");
+    },
+    [pruneMissingChannels],
+  );
+
+  // ルーム一覧をサーバーから読み直す(起動時・前面に戻った時・ログイン後)。失敗しても
+  // 保存済みの一覧で動き続ける。端末トークンが無効なら、勤務外の時だけ再ログインを促す
+  // (勤務中は今の接続を止めない。次に接続し直す時にトークン取得側で案内される)。
+  const refreshChannels = useCallback(
+    async (why: string) => {
+      // 送信中だったために後回しにした、無くなったルームの整理があれば先に行う。
+      if (channelsPrunePendingRef.current) pruneMissingChannels("送信中に後回しにした整理");
+      const startedAt = Date.now();
+      if (startedAt - channelsFetchedAtRef.current < CHANNELS_REFRESH_MIN_MS) return;
+      // 端末トークンが無い(未ログイン・開発用の旧方式キーだけ)なら読めないので何もしない。
+      if (!(await loadDeviceToken())) return;
+      channelsFetchedAtRef.current = startedAt;
+      try {
+        const list = await fetchChannels();
+        applyServerChannels(list);
+        logDebug(`ルーム一覧: 取得(${why}) ${list.map((c) => c.label).join("・")}`);
+      } catch (e) {
+        channelsFetchedAtRef.current = 0;
+        logDebug(`ルーム一覧: 取得できません(${why}) ${errMsg(e)} → 保存済みの一覧を使います`);
+        if ((e as { code?: unknown } | null)?.code === "device_token_invalid") {
+          // 勤務中でも、使い回し用の音声サーバーのトークンは捨てる(今の接続は切らないが、
+          // 次に接続し直す時はトークンを取り直し、無効なら再ログインの案内になる)。
+          clearTokenCache();
+          if (!wantConnectedRef.current && !pttJoinedRef.current) {
+            await saveDeviceToken(null);
+            setHasDeviceToken(false);
+            if (!INTERCOM_KEY) setAuthState("needLogin");
+            showError(e, "ログインの有効期限が切れました");
+          }
+        }
+      }
+    },
+    [applyServerChannels, logDebug, pruneMissingChannels, showError],
+  );
+
+  // 個別の残り時間の表示を、画面を見ている間だけ1秒ごとに進める。
+  useEffect(() => {
+    if (!dmTarget) return;
+    setNowTick(Date.now());
+    const id = setInterval(() => {
+      if (AppState.currentState === "active") setNowTick(Date.now());
+    }, 1000);
+    return () => clearInterval(id);
+  }, [dmTarget]);
+
   // 「話す」ホールド: 押している間だけ送信(PTKit経由)。
   const pttPressIn = useCallback(() => {
     screenHoldRef.current = true;
+    const pressedAt = Date.now();
+    pressAtRef.current = pressedAt;
+    traceStart("画面のボタン", pressedAt);
+    kickTalkSync("画面のボタン", pressedAt);
+    traceMark("開始要求");
     PttChannel?.beginTransmitting().catch((e) => {
       screenHoldRef.current = false;
       logDebug(`PTT: 開始失敗 ${errMsg(e)}`);
+      traceEnd("開始失敗");
       if (!nativePttJoined()) {
         // ネイティブ側でチャンネルから外れていた。表示を実態に合わせ、
         // 「ロック中でも話せるようにする」ボタンを出す(次の押下は画面から直接送る)。
@@ -1763,7 +3222,7 @@ export default function App() {
         setError("送信を開始できませんでした。もう一度押してください");
       }
     });
-  }, [logDebug, setError]);
+  }, [kickTalkSync, logDebug, setError, traceEnd, traceMark, traceStart]);
   const pttPressOut = useCallback(() => {
     screenHoldRef.current = false;
     PttChannel?.endTransmitting().catch((e) => {
@@ -1789,9 +3248,21 @@ export default function App() {
       pttPressIn();
     } else {
       holdPathRef.current = "direct";
-      void setMic(true);
+      const gen = ++directTxGenRef.current;
+      void (async () => {
+        // 話す先の反映を確かめてから開く(待っている間に指を離したら開かない)。
+        await openMicDirect(
+          "画面のボタン",
+          Date.now(),
+          () => holdPathRef.current === "direct" && directTxGenRef.current === gen,
+        );
+        // 開いている途中で指を離した(離した時の OFF が先に終わった)なら閉じ直す。
+        if (holdPathRef.current !== "direct" && directTxGenRef.current === gen) {
+          await setMic(false);
+        }
+      })();
     }
-  }, [pttPressIn, setMic, setError]);
+  }, [openMicDirect, pttPressIn, setMic, setError]);
   const talkPressOut = useCallback(() => {
     setHolding(false);
     const path = holdPathRef.current;
@@ -1842,11 +3313,22 @@ export default function App() {
   // 依存は ref と安定したコールバックのみ(識別子が変わるとイベント購読が張り直しになる)。
   const handleBlePress = useCallback(
     (payload?: BlePressEvent | null) => {
+      // JSが押下を受け取った時刻(所要時間の記録の起点。ネイティブの受信時刻が分かればそちら)。
+      const receivedAt = Date.now();
       const fromKeyboard = payload === undefined;
       const kind: BlePressKind =
         payload?.kind === "down" || payload?.kind === "up" ? payload.kind : "toggle";
       const replayed = payload?.replayed === true;
       const ageMs = typeof payload?.ageMs === "number" ? payload.ageMs : 0;
+      const nativeAt =
+        typeof payload?.atMs === "number"
+          ? payload.atMs
+          : replayed && ageMs > 0
+            ? receivedAt - ageMs
+            : undefined;
+      // 押した時刻(個別の期限の判断用)。再送された押下は、実際に押された時刻にする。
+      const pressedAt = replayed && ageMs > 0 ? receivedAt - ageMs : receivedAt;
+      const traceLabel = fromKeyboard ? "リモコン押下" : replayed ? "BLE押下(再送)" : "BLE押下";
       const tag = fromKeyboard
         ? "リモコン(キーボード型)"
         : `BLEボタン(${BLE_KIND_LABEL[kind]}${replayed ? `・${ageMs}ms前の再送` : ""})`;
@@ -1956,12 +3438,18 @@ export default function App() {
           bleToggleInitiatedRef.current = true;
           armBleBeginWatchdog();
           logDebug(`${tag}: PTT送信開始(押している間だけ)`);
+          traceStart(traceLabel, receivedAt, nativeAt);
+          // 話す先の反映(個別の期限切れなど)を、システムの開始確定を待つ間に進めておく。
+          pressAtRef.current = pressedAt;
+          kickTalkSync(tag, pressedAt);
+          traceMark("開始要求");
           PttChannel.beginTransmitting().catch((e) => {
             // 失敗したら意図もリセットする(離した時に無関係な送信を止めないように)。
             bleTxIntentRef.current = false;
             bleToggleInitiatedRef.current = false;
             clearBleBeginWatchdog();
             logDebug(`BLEボタン: 開始失敗 ${errMsg(e)}`);
+            traceEnd("開始失敗");
           });
           return;
         }
@@ -1994,12 +3482,17 @@ export default function App() {
           bleTxModeRef.current = "toggle";
           armBleBeginWatchdog();
           logDebug(`${tag}: PTT送信開始`);
+          traceStart(traceLabel, receivedAt, nativeAt);
+          pressAtRef.current = pressedAt;
+          kickTalkSync(tag, pressedAt);
+          traceMark("開始要求");
           PttChannel.beginTransmitting().catch((e) => {
             // 失敗したら意図もリセットする(次の押下がまた「開始」になるように)。
             bleTxIntentRef.current = false;
             bleToggleInitiatedRef.current = false;
             clearBleBeginWatchdog();
             logDebug(`BLEボタン: 開始失敗 ${errMsg(e)}`);
+            traceEnd("開始失敗");
           });
         }
         return;
@@ -2021,7 +3514,19 @@ export default function App() {
         bleDirectActiveRef.current = starting && !fromKeyboard;
         bleTxModeRef.current = "toggle";
         logDebug(`${tag}: 送信${starting ? "開始" : "停止"}(通常経路)`);
-        toggleMic(AUTO_OFF_MS);
+        if (!starting) {
+          void toggleMic(AUTO_OFF_MS);
+          return;
+        }
+        traceStart(traceLabel, receivedAt, nativeAt);
+        void toggleMic(AUTO_OFF_MS).then((opened) => {
+          if (!opened) {
+            traceEnd("マイクON失敗");
+            return;
+          }
+          traceMark("マイクON");
+          traceEnd("通常経路");
+        });
         return;
       }
       // 押している間だけ方式の「押す」。
@@ -2045,8 +3550,28 @@ export default function App() {
       };
       armHoldCap();
       logDebug(`${tag}: 送信開始(押している間だけ・通常経路)`);
+      traceStart(traceLabel, receivedAt, nativeAt);
+      const gen = ++directTxGenRef.current;
       void (async () => {
-        await setMic(true);
+        // 話す先(個別の期限など)の反映を確かめてから開く。待っている間に離されたら開かない。
+        const opened = await openMicDirect(
+          tag,
+          receivedAt,
+          () => bleDirectActiveRef.current && directTxGenRef.current === gen,
+        );
+        if (!opened) {
+          traceEnd("マイクON失敗");
+          // 後から押し直された・止められた時は、そちらに任せる(新しい送信を閉じない)。
+          if (directTxGenRef.current !== gen) return;
+          // 開けなかった(離された・話す先を切り替えられない等)。押している記録を戻し、
+          // 念のため閉じ直す(閉じ終えると上限のタイマーも消える)。
+          bleDirectActiveRef.current = false;
+          micOnRef.current = false;
+          await setMic(false);
+          return;
+        }
+        traceMark("マイクON");
+        traceEnd("通常経路");
         // マイクの切替中に離された(または上限・切断で止められた)なら閉じ直す
         // (離した後にONの処理が完了して、マイクが開いたまま残る事故の防止)。
         if (!bleDirectActiveRef.current) {
@@ -2064,10 +3589,15 @@ export default function App() {
       armBleBeginWatchdog,
       clearBleBeginWatchdog,
       connect,
+      kickTalkSync,
       logDebug,
+      openMicDirect,
       setMic,
       stopBleTransmission,
       toggleMic,
+      traceEnd,
+      traceMark,
+      traceStart,
     ],
   );
 
@@ -2092,7 +3622,7 @@ export default function App() {
         return;
       }
       logDebug(`イヤホンのボタン(${key}): 送信の開始/停止`);
-      toggleMic(EARPHONE_AUTO_OFF_MS);
+      void toggleMic(EARPHONE_AUTO_OFF_MS);
     });
     return () => sub.remove();
   }, [connect, logDebug, toggleMic]);
@@ -2133,6 +3663,9 @@ export default function App() {
       // 失敗からの再試行)。退勤中もつないでおく(押下は退勤済みとして無視される)ことで、
       // 出勤した瞬間からボタンで話せる。
       restartBleButton();
+      // 管理画面で変わったルーム一覧を読み直す(退勤中も。出勤前に選べるように。
+      // 失敗しても保存済みの一覧で動く)。
+      void refreshChannels("前面復帰");
       if (clockedOutRef.current) {
         // 退勤済み。チャンネルが残っていれば退出をやり直し、自動再接続はしない。
         if (nativePttJoined()) {
@@ -2150,20 +3683,24 @@ export default function App() {
         setShiftOn(true);
       }
       // 名前が空なら端末の保存内容を読み直す(再起動直後に読めなかった場合など)。
-      // ルームも必ず一緒に読み直す(名前だけ戻すと既定のルームに入ってしまうため)。
+      // 聞くルーム・話す先も必ず一緒に読み直す(名前だけ戻すと既定のルームに話してしまうため)。
       if (!identityRef.current.trim()) {
         const savedName = readSetting(SETTINGS_KEYS.displayName);
         if (savedName && savedName.trim()) {
           identityRef.current = savedName;
           setIdentity(savedName);
-          const savedRoom = readSetting(SETTINGS_KEYS.room);
-          if (savedRoom && ROOMS.some((r) => r.id === savedRoom)) {
-            roomIdRef.current = savedRoom;
-            setRoomId(savedRoom);
+          if (readSetting(SETTINGS_KEYS.room) !== null) {
+            const prefs = loadSavedListenTalk();
+            listenRef.current = prefs.listen;
+            talkChannelRef.current = prefs.talk;
+            setListen(prefs.listen);
+            setTalkChannel(prefs.talk);
           }
           setNameMissing(false);
         }
       }
+      // 裏にいる間に止まっていた個別の自動解除のタイマーを確かめ直す。
+      checkDmExpiry();
       const room = roomRef.current;
       const disconnected = !room || room.state === ConnectionState.Disconnected;
       if (
@@ -2181,7 +3718,7 @@ export default function App() {
       if (state === "active") onActive();
     });
     return () => sub.remove();
-  }, [connect, logDebug, restartBleButton]);
+  }, [checkDmExpiry, connect, logDebug, refreshChannels, restartBleButton]);
 
   // BLEボタンのイベント購読 + 起動時の接続維持開始。
   // 常に表示されている App 本体で購読する(画面の一部に置くと、表示の切替で購読が
@@ -2333,6 +3870,7 @@ export default function App() {
   useEffect(() => {
     return () => {
       void cleanup();
+      if (dmTimerRef.current) clearTimeout(dmTimerRef.current);
     };
   }, [cleanup]);
 
@@ -2359,10 +3897,14 @@ export default function App() {
     setError(null);
     try {
       await deviceLogin(password);
+      clearTokenCache();
       logDebug("端末ログイン: 成功");
       setLoginPassword("");
       setHasDeviceToken(true);
       setAuthState("ok");
+      // 登録できたので、管理画面のルーム一覧を読む。
+      channelsFetchedAtRef.current = 0;
+      void refreshChannels("ログイン");
     } catch (e) {
       logDebug(`端末ログイン: 失敗 ${errMsg(e)}`);
       showError(e, "ログインできませんでした");
@@ -2372,6 +3914,7 @@ export default function App() {
   };
 
   const logoutDevice = async () => {
+    clearTokenCache();
     await saveDeviceToken(null);
     setHasDeviceToken(false);
     logDebug("端末ログイン: 解除");
@@ -2382,7 +3925,37 @@ export default function App() {
   // 勤務中なのに名前が保存されていない(名前を保存する前の版から更新した直後に、
   // iOSがチャンネルを復元した場合など)。入力欄を隠すと先に進めなくなるので、その時は出す。
   const needsName = nameMissing && !connected;
-  const roomLabel = ROOMS.find((r) => r.id === roomId)?.label ?? roomId;
+  // 話す先のルーム名(個別をやめた時に戻る先でもある)。
+  const roomLabel = channelLabel(talkChannel, channels);
+  // 聞くルームの名前(画面の並びどおり。一覧に無いIDはそのまま)。
+  const listenedChannels: ChannelItem[] = [
+    ...channels.filter((c) => listen.includes(c.id)),
+    ...listen
+      .filter((id) => !channels.some((c) => c.id === id))
+      .map((id) => ({ id, label: channelLabel(id, channels) })),
+  ];
+  const listenLabel = listenedChannels.map((c) => c.label).join("・");
+  // 送信中(と押している間)は、聞くルーム・話す先・個別の相手を変えられない。
+  const talkLocked = micOn || holding;
+  // 話す先の表示。送信中は、そのマイクを開いた時点の話す先を出す。
+  const nameOfIdentity = (id: string): string =>
+    dmTarget?.identity === id
+      ? dmTarget.name
+      : (people.find((p) => p.identity === id)?.name ?? displayNameOf({ identity: id }));
+  const describeTalk = (talk: string): string => {
+    const parsed = parseTalk(talk);
+    return parsed.kind === "dm"
+      ? `🔒 ${nameOfIdentity(parsed.target)}さんだけ（個別）`
+      : `「${channelLabel(parsed.id, channels)}」`;
+  };
+  const currentTalkText = dmTarget ? `🔒 ${dmTarget.name}さん（個別）` : roomLabel;
+  const liveTalkText = micOn
+    ? describeTalk(micOpenTalkRef.current ?? (dmTarget ? dmTalk(dmTarget.identity) : talkChannel))
+    : "";
+  // 個別の残り秒数(話し終えてから数える。送信中は数えない)。
+  const dmLeftSec = dmTarget
+    ? Math.min(DM_REVERT_MS / 1000, Math.ceil(dmRemainingMs(dmSince, nowTick) / 1000))
+    : 0;
   // 物理ボタンの表示用の状態。ready(押下通知の購読が有効)の時だけ「使える」とする
   // (旧ネイティブビルドは ready を返さないので、その時はリンクの接続で代用する)。
   const bleRegistered = !!BleButton && bleStatus.registered;
@@ -2417,7 +3990,7 @@ export default function App() {
               : { tone: "busy", text: "再接続待ち" };
   // 画面上部に出す現在の状態。
   const statusView: { tone: "idle" | "ok" | "busy" | "warn" | "live"; text: string } = micOn
-    ? { tone: "live", text: "送信中 — あなたの声が流れています" }
+    ? { tone: "live", text: `送信中 — ${liveTalkText}に話しています` }
     : connected
       ? bleCanTalk
         ? { tone: "ok", text: "待機中 — ボタンで話せます" }
@@ -2451,6 +4024,66 @@ export default function App() {
       ? "送信中 — 押して離すと停止"
       : "押して話す";
 
+  // 聞くルーム(複数可。「全体」は常に聞く)と話す先(聞くルームの中から1つ)の選択。
+  // 出勤前と出勤中で同じものを使う(出勤中は接続し直さずに切り替わる)。
+  const renderChannelPickers = (disabled: boolean) => (
+    <>
+      <Text style={[styles.cardLabel, { marginTop: 16 }]}>聞くルーム（複数可）</Text>
+      <View style={styles.roomRow}>
+        {channels.map((room) => {
+          const always = room.id === BROADCAST_CHANNEL;
+          const selected = always || listen.includes(room.id);
+          return (
+            <Pressable
+              key={room.id}
+              onPress={() => toggleListen(room.id)}
+              disabled={disabled || always}
+              style={[styles.roomChip, selected && styles.roomChipOn, disabled && styles.disabled]}
+            >
+              <Text style={[styles.roomChipText, selected && styles.roomChipTextOn]}>
+                {selected ? "✓ " : ""}
+                {room.label}
+                {always ? "（常に）" : ""}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+      <Text style={[styles.cardLabel, { marginTop: 16 }]}>話す先</Text>
+      <View style={styles.roomRow}>
+        {listenedChannels.map((room) => {
+          const selected = !dmTarget && room.id === talkChannel;
+          return (
+            <Pressable
+              key={room.id}
+              onPress={() => chooseTalkChannel(room.id)}
+              disabled={disabled}
+              style={[styles.roomChip, selected && styles.roomChipOn, disabled && styles.disabled]}
+            >
+              <Text style={[styles.roomChipText, selected && styles.roomChipTextOn]}>
+                {room.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+      {!channels.some((c) => c.id === talkChannel) ? (
+        <Text style={[styles.hint, styles.warnText]}>
+          ⚠️ 話す先のルーム「{talkChannel}」は管理画面で削除されました。話す先を選び直してください。
+        </Text>
+      ) : null}
+      {dmTarget ? (
+        <Text style={styles.hint}>
+          いまは {dmTarget.name}さんに個別で話す設定です。ルームを選ぶと個別を終えて、そのルームに話します。
+        </Text>
+      ) : (
+        <Text style={styles.hint}>
+          「全体」の声は常に聞こえます。話す先は、聞くルームの中から選びます（「全体」を選ぶと全員に届きます）。
+        </Text>
+      )}
+    </>
+  );
+
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="dark" />
@@ -2460,7 +4093,7 @@ export default function App() {
 
         {micOn ? (
           <View style={styles.liveBanner}>
-            <Text style={styles.liveText}>🔴 送信中（マイクON）</Text>
+            <Text style={styles.liveText}>🔴 送信中（マイクON）→ {liveTalkText}</Text>
           </View>
         ) : null}
 
@@ -2478,6 +4111,13 @@ export default function App() {
               </Pressable>
             ) : null}
           </View>
+        ) : null}
+
+        {notice ? (
+          <Pressable style={styles.noticeBox} onPress={() => setNotice(null)}>
+            <Text style={styles.noticeText}>{notice}</Text>
+            <Text style={styles.noticeClose}>タップで閉じる</Text>
+          </Pressable>
         ) : null}
 
         {authState === "needLogin" ? (
@@ -2516,9 +4156,12 @@ export default function App() {
           </View>
 
           {onShift && !needsName ? (
-            <Text style={styles.shiftSummary}>
-              {identity.trim()} ・ {roomLabel}
-            </Text>
+            <>
+              <Text style={styles.shiftSummary}>
+                {identity.trim()} ・ 話す先: {currentTalkText}
+              </Text>
+              <Text style={styles.shiftSub}>聞く: {listenLabel}</Text>
+            </>
           ) : (
             <>
               <Text style={[styles.cardLabel, { marginTop: 14 }]}>スタッフ名</Text>
@@ -2534,23 +4177,8 @@ export default function App() {
                 returnKeyType="done"
               />
 
-              <Text style={[styles.cardLabel, { marginTop: 16 }]}>参加ルーム</Text>
-              <View style={styles.roomRow}>
-                {ROOMS.map((room) => {
-                  const selected = room.id === roomId;
-                  return (
-                    <Pressable
-                      key={room.id}
-                      onPress={() => !connecting && setRoomId(room.id)}
-                      style={[styles.roomChip, selected && styles.roomChipOn]}
-                    >
-                      <Text style={[styles.roomChipText, selected && styles.roomChipTextOn]}>
-                        {room.label}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
+              {/* 出勤前に選ぶ(出勤中も下の「ルーム・個別に話す」で切り替えられる) */}
+              {onShift ? null : renderChannelPickers(connecting)}
             </>
           )}
 
@@ -2590,9 +4218,33 @@ export default function App() {
 
         {onShift && !clockedOut ? (
           <View style={styles.card}>
-            {remoteSpeakers.length > 0 ? (
-              <Text style={styles.speakingNow}>🗣 {remoteSpeakers.join("、")} が話しています</Text>
-            ) : null}
+            {remoteSpeakers.map((s) => (
+              <Text key={s.key} style={[styles.speakingNow, s.dm && styles.speakingDm]}>
+                {s.dm ? s.text : `${s.text} が話しています`}
+              </Text>
+            ))}
+
+            {dmTarget ? (
+              <View style={styles.dmBox}>
+                <Text style={styles.dmTitle}>🔒 {dmTarget.name}さんだけに個別で話す設定です</Text>
+                <Text style={styles.dmSub}>
+                  {talkLocked
+                    ? `送信中（話し終えてから${DM_REVERT_MS / 1000}秒で「${roomLabel}」に戻ります）`
+                    : dmLeftSec > 0
+                      ? `あと${dmLeftSec}秒で「${roomLabel}」（全員）に戻ります`
+                      : `まもなく「${roomLabel}」（全員）に戻ります`}
+                </Text>
+                <Pressable
+                  style={[styles.dmRevert, talkLocked && styles.disabled]}
+                  onPress={revertDmManually}
+                  disabled={talkLocked}
+                >
+                  <Text style={styles.dmRevertText}>全員（ルーム）に戻す</Text>
+                </Pressable>
+              </View>
+            ) : (
+              <Text style={styles.talkTarget}>話す先: {roomLabel}</Text>
+            )}
 
             <Pressable
               style={[
@@ -2654,6 +4306,57 @@ export default function App() {
             )}
             <Text style={[styles.hint, { marginTop: 6 }]}>
               診療中は患者さんの個人情報を言わず、チェア番号やセット名で伝えてください。
+            </Text>
+          </View>
+        ) : null}
+
+        {onShift && !clockedOut ? (
+          <View style={styles.card}>
+            <Text style={styles.bleTitle}>📢 ルームの切り替え・個別に話す</Text>
+            {renderChannelPickers(talkLocked)}
+            {talkLocked ? (
+              <Text style={[styles.hint, { color: "#b76e00" }]}>
+                送信中は切り替えられません（話し終えると選べます）。
+              </Text>
+            ) : null}
+
+            <Text style={[styles.cardLabel, { marginTop: 18 }]}>
+              個別に話す（選んだ1人だけに届きます）
+            </Text>
+            {!connected ? (
+              <Text style={styles.hint}>接続している間だけ、出勤中の人を選べます。</Text>
+            ) : people.length === 0 ? (
+              <Text style={styles.hint}>いま出勤中のほかのスタッフはいません。</Text>
+            ) : (
+              <View style={styles.roomRow}>
+                {people.map((p) => {
+                  const selected = dmTarget?.identity === p.identity;
+                  return (
+                    <Pressable
+                      key={p.identity}
+                      onPress={() => selectDmTarget(p)}
+                      disabled={talkLocked}
+                      style={[
+                        styles.roomChip,
+                        selected && styles.dmChipOn,
+                        talkLocked && styles.disabled,
+                      ]}
+                    >
+                      <Text style={[styles.roomChipText, selected && styles.roomChipTextOn]}>
+                        {selected ? "🔒 " : ""}
+                        {p.name}
+                        {p.home ? `（${channelLabel(p.home, channels)}）` : ""}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+            <Text style={styles.hint}>
+              ・個別にすると、選んだ人だけに声が届きます（ほかの人には聞こえません）。
+              {"\n"}・最後に話し終えてから{DM_REVERT_MS / 1000}
+              秒たつと、自動で全員（ルーム）に戻ります。すぐ戻す時は「全員（ルーム）に戻す」。
+              {"\n"}・相手が退勤・切断すると、すぐ全員（ルーム）に戻ります。
             </Text>
           </View>
         ) : null}
@@ -2978,6 +4681,7 @@ const styles = StyleSheet.create({
   statusDot: { width: 12, height: 12, borderRadius: 6, marginRight: 10 },
   statusText: { flex: 1, color: "#172033", fontSize: 16, fontWeight: "700" },
   shiftSummary: { marginTop: 10, color: "#475467", fontSize: 15, fontWeight: "600" },
+  shiftSub: { marginTop: 4, color: "#667085", fontSize: 13 },
   speakingNow: {
     color: "#0f4bd8",
     fontSize: 16,
@@ -2985,6 +4689,45 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     textAlign: "center",
   },
+  // 自分あての個別(ほかの人には聞こえていない)。通常の受信と見分けられる色にする。
+  speakingDm: { color: "#6b2fb3" },
+  talkTarget: {
+    color: "#27354f",
+    fontSize: 15,
+    fontWeight: "700",
+    marginBottom: 10,
+    textAlign: "center",
+  },
+  // 個別に話す設定中の表示
+  dmBox: {
+    marginBottom: 12,
+    backgroundColor: "#f4eefc",
+    borderColor: "#d5c2f0",
+    borderWidth: 1,
+    borderRadius: 14,
+    padding: 12,
+  },
+  dmTitle: { color: "#4b1f87", fontSize: 15, fontWeight: "800", lineHeight: 21 },
+  dmSub: { marginTop: 4, color: "#5b3f80", fontSize: 13, lineHeight: 19 },
+  dmRevert: {
+    marginTop: 10,
+    backgroundColor: "#4b1f87",
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  dmRevertText: { color: "#ffffff", fontSize: 15, fontWeight: "700" },
+  dmChipOn: { backgroundColor: "#4b1f87" },
+  noticeBox: {
+    backgroundColor: "#eef4ff",
+    borderColor: "#b9cdf7",
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 16,
+  },
+  noticeText: { color: "#1f3f8a", lineHeight: 20 },
+  noticeClose: { marginTop: 6, color: "#667085", fontSize: 12 },
   warnBox: {
     marginTop: 12,
     backgroundColor: "#fff7e6",
