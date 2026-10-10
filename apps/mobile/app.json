@@ -9,6 +9,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "jp.co.medident.mirailink",
+      "appleTeamId": "RCNX8548N2",
       "entitlements": {
         "com.apple.developer.push-to-talk": true,
         "aps-environment": "development"
@@ -16,14 +17,25 @@
       "infoPlist": {
         "NSMicrophoneUsageDescription": "院内インカムで通話するためにマイクを使用します。",
         "NSBluetoothAlwaysUsageDescription": "BLEリモコン（ボタン）で送信を開始/停止するためにBluetoothを使用します。",
-        "UIBackgroundModes": ["audio", "push-to-talk", "bluetooth-central"]
+        "UIBackgroundModes": [
+          "audio",
+          "push-to-talk",
+          "bluetooth-central"
+        ]
       }
     },
     "android": {
       "package": "jp.co.medident.mirailink",
       "permissions": [
         "android.permission.RECORD_AUDIO",
-        "android.permission.MODIFY_AUDIO_SETTINGS"
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.WAKE_LOCK"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -39,6 +51,12 @@
     "plugins": [
       "@livekit/react-native-expo-plugin",
       "@config-plugins/react-native-webrtc"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "656799af-e44c-4ace-9dd0-31f173a1be08"
+      }
+    },
+    "owner": "tomyorts"
   }
 }

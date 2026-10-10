@@ -1,0 +1,27 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
+  <!-- Android 12以降: 付近のデバイス(BLEボタン)の検索と接続。
+       ボタンの検索結果から位置を推定しないため neverForLocation を宣言する
+       (これにより位置情報の許可なしで検索できる)。 -->
+  <uses-permission
+    android:name="android.permission.BLUETOOTH_SCAN"
+    android:usesPermissionFlags="neverForLocation"
+    tools:targetApi="s" />
+  <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+  <!-- Android 11以前: 旧来のBluetooth権限と、BLE検索に必要な位置情報の許可。 -->
+  <uses-permission
+    android:name="android.permission.BLUETOOTH"
+    android:maxSdkVersion="30" />
+  <uses-permission
+    android:name="android.permission.BLUETOOTH_ADMIN"
+    android:maxSdkVersion="30" />
+  <uses-permission
+    android:name="android.permission.ACCESS_FINE_LOCATION"
+    android:maxSdkVersion="30" />
+
+  <!-- BLEボタンは任意機能(イヤホンのボタンだけでも使える)。非対応端末にも配布できるようにする。 -->
+  <uses-feature
+    android:name="android.hardware.bluetooth_le"
+    android:required="false" />
+</manifest>
