@@ -2,6 +2,7 @@ import { AccessToken, TrackSource } from "livekit-server-sdk";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { safeEqual, SESSION_COOKIE, verifySessionToken } from "@/app/lib/auth";
+import { SHARED_ROOM } from "@/app/lib/channels";
 import { bearerToken, verifyDeviceToken } from "@/app/lib/deviceAuth";
 import {
   DISPLAY_NAME_MAX_LENGTH,
@@ -137,6 +138,9 @@ export async function POST(request: NextRequest) {
       canPublishSources: [TrackSource.MICROPHONE],
       canSubscribe: true,
       canPublishData: true,
+      // 共通ルーム(新しいアプリ・PC画面)では、聞く/話す先を参加者属性で知らせるため、
+      // 自分の属性の更新を許可する。旧アプリのルーム別接続は従来どおり。
+      ...(room === SHARED_ROOM ? { canUpdateOwnMetadata: true } : {}),
     });
 
     return NextResponse.json({
