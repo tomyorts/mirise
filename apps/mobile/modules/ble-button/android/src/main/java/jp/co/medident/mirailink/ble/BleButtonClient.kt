@@ -340,7 +340,11 @@ internal object BleButtonClient {
 
   private fun emitToggle(at: Long) {
     if (observing && emitter != null) {
-      emit("onPress", mapOf<String, Any?>("kind" to KIND_TOGGLE))
+      // atMs: 診断用(JS が押下を受け取るまでの遅れを測る)。動作には使わない。
+      emit(
+        "onPress",
+        mapOf<String, Any?>("kind" to KIND_TOGGLE, "atMs" to System.currentTimeMillis().toDouble())
+      )
     } else {
       pendingToggleAt = at
     }
@@ -351,7 +355,10 @@ internal object BleButtonClient {
     // 送信が始まる恐れがあるため。トグルと違い後追いはしない)。
     if (!observing || emitter == null) return
     isDown = true
-    emit("onPress", mapOf<String, Any?>("kind" to KIND_DOWN))
+    emit(
+      "onPress",
+      mapOf<String, Any?>("kind" to KIND_DOWN, "atMs" to System.currentTimeMillis().toDouble())
+    )
   }
 
   // 長押しで送信中なら up を送って止める。接続断・解除・流量制限・モード変更など

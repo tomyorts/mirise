@@ -61,6 +61,11 @@ export type BlePressEvent = {
   replayed?: boolean;
   /** 再送時: 実際に押されてからの経過ミリ秒 */
   ageMs?: number;
+  /**
+   * ネイティブが押下を受け取って送り出した時刻(1970年からのミリ秒・端末の時計)。
+   * 診断ログの所要時間の記録で「JSが起こされるまでの遅れ」を測るためだけに使う。旧ビルドでは無し
+   */
+  atMs?: number;
 };
 
 export type BleButtonStateEvent = {

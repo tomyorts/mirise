@@ -752,7 +752,8 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     // アプリを動かし続けてもらう(BLEイベントで起こされた直後は猶予が短いため)。
     holdBackgroundTime()
     if observing {
-      module?.emit("onPress", ["kind": kind])
+      // atMs: 診断用(JSが押下を受け取るまでの遅れを測る)。動作には使わない。
+      module?.emit("onPress", ["kind": kind, "atMs": Date().timeIntervalSince1970 * 1000])
     } else {
       // JSがまだ購読していない(バックグラウンド起動直後など)。
       // 破棄せず保持し、購読開始時に再送する。
