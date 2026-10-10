@@ -38,7 +38,7 @@ public class BleButtonModule: Module {
     Events("onPress", "onStateChanged")
 
     Constants([
-      "buildTag": "button-1"
+      "buildTag": "button-2"
     ])
 
     OnCreate {
@@ -131,6 +131,9 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
   // 離した通知(0x00)を別に送ってくるボタンか(=押している間だけ送信が可能か)。
   private static let holdCapableKey = "BleButtonHoldCapable"
   private static let modeKey = "BleButtonMode"
+  // 押下特性に購読設定(CCCD)が無いボタンか。安価なiTagの一部は、購読しなくても
+  // 押下を通知してくる(購読の書き込みは「属性が見つからない」で失敗する)。
+  private static let noCccdKey = "BleButtonNoCccd"
 
   // MARK: - UUID
 
@@ -201,6 +204,8 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     let holdCapable: Bool
     // 実際に使う方式。ホールド非対応のボタンは常に "toggle"。
     let mode: String
+    // 購読設定(CCCD)が無く、購読なしで押下が届くボタン(登録時に実際の押下で確認済み)。
+    let noCccd: Bool
   }
 
   // 登録確認中の、特性ごとの観測結果。
@@ -262,6 +267,10 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
   // 購読要求を出した/購読が確認できた押下特性(FFE1/FFF1)。
   private var setupSubscribing: Set<CBUUID> = []
   private var setupSubscribed: Set<CBUUID> = []
+  // 購読設定(CCCD)が無いため、購読なしで押下を待っている押下特性。
+  private var setupNoCccd: Set<CBUUID> = []
+  // 今回の登録で「購読なしで待ったが押下が届かなかった」候補があったか(失敗時の案内用)。
+  private var setupNoCccdUnanswered = false
   private var setupProbes: [CBUUID: SetupProbe] = [:]
   private var setupFinalizeWork: DispatchWorkItem?
   private var scanDeadlineWork: DispatchWorkItem?
@@ -359,6 +368,7 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     disconnectCurrent()
     setupPromise = promise
     setupCandidates = [:]
+    setupNoCccdUnanswered = false
     ensureManager()
     guard let manager else {
       failSetup("E_INTERNAL", "Bluetoothを初期化できませんでした")
@@ -397,7 +407,7 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     // 押している最中なら、ここで「離す」も送られる。
     disconnectCurrent()
     let defaults = UserDefaults.standard
-    for key in [Self.uuidKey, Self.nameKey, Self.serviceKey, Self.charKey, Self.holdCapableKey, Self.modeKey] {
+    for key in [Self.uuidKey, Self.nameKey, Self.serviceKey, Self.charKey, Self.holdCapableKey, Self.modeKey, Self.noCccdKey] {
       defaults.removeObject(forKey: key)
     }
     mutedUntil = 0
@@ -435,7 +445,8 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
       service: pair.service,
       characteristic: pair.characteristic,
       holdCapable: holdCapable,
-      mode: mode
+      mode: mode,
+      noCccd: defaults.bool(forKey: Self.noCccdKey)
     )
   }
 
@@ -482,15 +493,27 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
 
   // 状態復元で引き継いだペリフェラルに、登録した押下特性(登録したサービスの下のもの)の
   // 購読が有効なまま残っているか(iOSは発見済みのサービス・特性・購読状態も復元する)。
+  // 購読設定(CCCD)が無いボタンは購読が要らないので、特性が発見済みなら引き継ぎ済みとみなす。
   private static func hasInheritedPressSubscription(_ p: CBPeripheral, reg: Registration) -> Bool {
     let services: [CBService] = p.services ?? []
     for service in services where service.uuid == reg.service {
       let characteristics: [CBCharacteristic] = service.characteristics ?? []
-      for c in characteristics where c.uuid == reg.characteristic && c.isNotifying {
+      for c in characteristics where c.uuid == reg.characteristic && (c.isNotifying || reg.noCccd) {
         return true
       }
     }
     return false
+  }
+
+  // 購読(通知の有効化)の失敗が「購読設定(CCCD)が無い」ことによるものか。
+  // iOS は購読の書き込み先(CCCD)を探して見つからないと、ATTの Attribute Not Found を返す。
+  private static func isMissingCccd(_ error: Error?) -> Bool {
+    guard let error else { return false }
+    if let attError = error as? CBATTError, attError.code == .attributeNotFound {
+      return true
+    }
+    let nsError = error as NSError
+    return nsError.domain == CBATTErrorDomain && nsError.code == CBATTError.Code.attributeNotFound.rawValue
   }
 
   private static func displayName(_ raw: String?) -> String {
@@ -790,6 +813,7 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     setupPendingPressServices = 0
     setupSubscribing = []
     setupSubscribed = []
+    setupNoCccd = []
     setupProbes = [:]
     setupFinalizeWork?.cancel()
     setupFinalizeWork = nil
@@ -852,7 +876,12 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     }
     peripheral = nil
     guard !setupQueue.isEmpty else {
-      failSetup("E_CONFIRM_TIMEOUT", "ボタンを確定できませんでした。ボタンをスマホの近くで短く2回押して、もう一度お試しください")
+      if setupNoCccdUnanswered {
+        // 購読なしで待ったが押下が届かなかった: iPhoneでは押下を受け取れない機種の可能性が高い。
+        failSetup("E_CONFIRM_TIMEOUT", "ボタンの押下が届きませんでした。ボタンをスマホの近くで短く2回押して、もう一度お試しください(何度試しても届かない場合、このタグはiPhoneでは使えない機種の可能性があります)")
+      } else {
+        failSetup("E_CONFIRM_TIMEOUT", "ボタンを確定できませんでした。ボタンをスマホの近くで短く2回押して、もう一度お試しください")
+      }
       return
     }
     let next = setupQueue.removeFirst()
@@ -883,6 +912,10 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
       self.confirmTimeoutWork = nil
       // 押下を確認済みで確定を見届け中なら、そちらを優先する。
       if self.setupFinalizeWork != nil { return }
+      if !self.setupNoCccd.isEmpty && self.setupProbes.isEmpty {
+        self.setupNoCccdUnanswered = true
+        self.emitState("debug", "購読なしで待ちましたが、押下が届きませんでした")
+      }
       // この候補は購読できない/押下が来なかった(=別の機器の可能性)。次の候補へ。
       self.tryNextSetupCandidate()
     }
@@ -947,10 +980,16 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
       tryNextSetupCandidate()
       return
     }
-    confirmRegistration(p, service: pressServiceUUID, characteristic: charUUID, holdCapable: probe.holdCapable)
+    confirmRegistration(
+      p,
+      service: pressServiceUUID,
+      characteristic: charUUID,
+      holdCapable: probe.holdCapable,
+      noCccd: setupNoCccd.contains(charUUID)
+    )
   }
 
-  private func confirmRegistration(_ p: CBPeripheral, service: CBUUID, characteristic: CBUUID, holdCapable: Bool) {
+  private func confirmRegistration(_ p: CBPeripheral, service: CBUUID, characteristic: CBUUID, holdCapable: Bool, noCccd: Bool) {
     let name = candidateName(p)
     let defaults = UserDefaults.standard
     defaults.set(p.identifier.uuidString, forKey: Self.uuidKey)
@@ -959,6 +998,7 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     defaults.set(characteristic.uuidString, forKey: Self.charKey)
     defaults.set(holdCapable, forKey: Self.holdCapableKey)
     defaults.set(holdCapable ? "hold" : "toggle", forKey: Self.modeKey)
+    defaults.set(noCccd, forKey: Self.noCccdKey)
 
     // 確定しなかった方の購読(FFE1とFFF1の両方を持つ機器の場合)は解除する。
     for s in p.services ?? [] {
@@ -1345,6 +1385,9 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     if c.isNotifying {
       // 状態復元などで、購読が有効なまま引き継がれている。
       markReady(peripheral)
+    } else if reg.noCccd {
+      // 購読設定(CCCD)が無いボタン: 購読せずに押下が届く(登録時に実際の押下で確認済み)。
+      markReady(peripheral)
     } else {
       // 有効になったかは didUpdateNotificationStateFor で確認してから ready にする。
       peripheral.setNotifyValue(true, for: c)
@@ -1363,6 +1406,17 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
         if !setupAwaitingPress {
           beginConfirmPhase(peripheral)
         }
+      } else if Self.isMissingCccd(error) && characteristic.properties.contains(.notify) {
+        // 購読設定(CCCD)が無い安価なiTag: 購読しなくても押下を通知してくる機種がある。
+        // 購読なしで押下を待つ(実際の2回押しが届いた時だけ登録するので、届かない機種は
+        // これまでどおり登録されない)。
+        emitState("debug", "購読設定が無い機種です。購読なしで押下を待ちます(\(characteristic.uuid.uuidString))")
+        setupSubscribed.insert(characteristic.uuid)
+        setupNoCccd.insert(characteristic.uuid)
+        subscribeGraceUntil = Self.now() + Self.setupSubscribeGrace
+        if !setupAwaitingPress {
+          beginConfirmPhase(peripheral)
+        }
       } else {
         emitState("debug", "通知の購読に失敗 \(characteristic.uuid.uuidString): \(error?.localizedDescription ?? "不明")")
         if setupSubscribing.isEmpty && setupSubscribed.isEmpty && setupPendingPressServices <= 0 {
@@ -1375,6 +1429,14 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     // 通常運用: 登録した組の購読結果だけを見る(登録確定時に解除した別の特性などは無視)。
     guard let reg = loadRegistration(), peripheral.identifier == reg.identifier else { return }
     guard Self.matches(characteristic, service: reg.service, characteristic: reg.characteristic) else { return }
+    if Self.isMissingCccd(error) && characteristic.properties.contains(.notify) {
+      // 登録時に実際の押下を確認した特性で、購読設定(CCCD)だけが無い。購読なしで押下が届く
+      // 機種として扱い、次回からは購読を試みない。
+      UserDefaults.standard.set(true, forKey: Self.noCccdKey)
+      emitState("debug", "購読設定が無い機種のため、購読なしで使います")
+      markReady(peripheral)
+      return
+    }
     if let error {
       // 購読できない=押しても届かない。切断して既存の再接続処理でやり直す。
       dropLinkForRetry(peripheral, "ボタンの通知を有効にできませんでした(\(error.localizedDescription))。接続し直します", delay: 5)
