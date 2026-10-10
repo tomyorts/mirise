@@ -202,6 +202,8 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
   private static let noCccdMaxGap: TimeInterval = 3.0
   private static let noCccdConfirmSettle: TimeInterval = 3.0
   private static let noCccdConfirmTimeout: TimeInterval = 12
+  // この間隔より短く続いた押下(非0)の通知は、1回の押下の重複とみなして数えない。
+  private static let noCccdDuplicateWindow: TimeInterval = 0.15
   // 登録確認中にこれを超える通知が来た機器はボタンではない(センサー等)とみなす。
   private static let setupFloodLimit = 8
   // 押下をJSへ渡す時に、iOSにアプリを動かし続けてもらう時間(PushToTalkの呼び出しが間に合うように)。
@@ -230,6 +232,8 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     var nonZeroCount: Int = 0
     var firstNonZeroAt: TimeInterval = 0
     var lastNonZeroAt: TimeInterval = 0
+    // 登録の条件が成立した時点の非0通知の回数(見届け中に増えたかの判定用)。
+    var nonZeroAtConfirm: Int = 0
   }
 
   // MARK: - 接続状態
@@ -955,6 +959,10 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     guard setupAwaitingPress, isCandidate, !inGrace, let byte = data.first else { return }
     let noCccd = setupNoCccd.contains(characteristic.uuid)
     var probe = setupProbes[characteristic.uuid] ?? SetupProbe()
+    if noCccd, byte != 0, probe.nonZeroCount > 0, now - probe.lastNonZeroAt < Self.noCccdDuplicateWindow {
+      // 1回の押下で通知が重なって届いたもの。押下として数えない。
+      return
+    }
     if noCccd, byte != 0, setupFinalizeWork == nil, probe.nonZeroCount > 0,
        now - probe.lastNonZeroAt > Self.noCccdMaxGap {
       // 前の押下から間が空きすぎた: 人の「2回押し」ではない可能性があるので、この通知から数え直す。
@@ -986,6 +994,8 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
     }
     guard setupFinalizeWork == nil, enough else { return }
     // 条件成立。直後の「離す(0x00)」や通知の出続け(センサー等)を見届けてから確定する。
+    probe.nonZeroAtConfirm = probe.nonZeroCount
+    setupProbes[characteristic.uuid] = probe
     let charUUID = characteristic.uuid
     let work = DispatchWorkItem { [weak self, weak p] in
       guard let self, let p else { return }
@@ -1012,11 +1022,13 @@ final class BleButtonCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDe
       tryNextSetupCandidate()
       return
     }
-    if setupNoCccd.contains(charUUID) && probe.nonZeroCount > 2 {
+    if setupNoCccd.contains(charUUID) && probe.nonZeroCount > probe.nonZeroAtConfirm {
       // 購読設定が無い候補で、確認後の見届け中にも押下(非0)が届いた: 勝手に通知を出し
       // 続ける機器の可能性があるため登録しない(本物のボタンなら、2回押して待てば通る)。
-      emitState("debug", "購読設定が無い候補で押下が続いたため対象外にしました(\(probe.nonZeroCount)回)")
-      tryNextSetupCandidate()
+      // 条件成立までの押下(素早い2回押しの後のもう1回など)は数えない。
+      emitState("debug", "購読設定が無い候補で、登録の見届け中に押下が来たため対象外にしました(計\(probe.nonZeroCount)回)")
+      // 押していたのはこの機器なので、ほかの候補(近くの別のボタン等)へは進まずにやり直してもらう。
+      failSetup("E_CONFIRM_TIMEOUT", "登録中にボタンが押されたため、登録できませんでした。もう一度「ボタンを登録する」を押し、ボタンを短く2回押したら、3秒ほど押さずに待ってください")
       return
     }
     confirmRegistration(
