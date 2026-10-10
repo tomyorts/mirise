@@ -47,6 +47,11 @@ export type BleButtonStatus = {
   holdCapable?: boolean;
   /** 現在の方式(ホールド非対応のボタンは常に "toggle") */
   mode?: BleButtonMode;
+  /**
+   * 購読設定(CCCD)が無く、購読なしで押下が届くボタン(安価なiTagの一部・iOSのみ)。
+   * 登録時に実際の押下が届くことを確認済み。旧ビルドでは無し
+   */
+  noCccd?: boolean;
 };
 
 export type BlePressEvent = {
@@ -76,7 +81,7 @@ export type BleButtonModuleType = {
    * 押してもらって確定する。成功で { name, holdCapable }
    * (旧ネイティブビルドは holdCapable を返さない)。
    */
-  startSetup(): Promise<{ name: string; holdCapable: boolean }>;
+  startSetup(): Promise<{ name: string; holdCapable: boolean; noCccd?: boolean }>;
   /** 登録解除+切断 */
   unregister(): void;
   /** 押し方の方式を保存(ホールド非対応のボタンでは無視され、常に "toggle")。旧ビルドでは無し */

@@ -2261,7 +2261,7 @@ export default function App() {
       logDebug("BLEボタン: 登録スキャン開始");
       const result = await BleButton.startSetup();
       logDebug(
-        `BLEボタン: 登録成功 ${result?.name ?? ""}(${result?.holdCapable ? "押している間だけ送信できる" : "押すたびON/OFF"})`,
+        `BLEボタン: 登録成功 ${result?.name ?? ""}(${result?.holdCapable ? "押している間だけ送信できる" : "押すたびON/OFF"}${result?.noCccd ? "・互換モード" : ""})`,
       );
       // 登録できたかを、声を流さずに確かめてもらう(この間の押下は送信しない)。
       startBleTest();
@@ -2861,7 +2861,9 @@ export default function App() {
                     bleStatus.registered ? `登録: ${bleStatus.name ?? "BLEボタン"}` : "未登録"
                   } / リンク ${bleStatus.connected ? "あり" : "なし"} / 準備 ${
                     bleStatus.ready === undefined ? "不明" : bleStatus.ready ? "完了" : "未完了"
-                  } / 方式 ${bleStatus.mode ?? "-"}${bleStatus.holdCapable ? "（離した通知あり）" : ""}`
+                  } / 方式 ${bleStatus.mode ?? "-"}${bleStatus.holdCapable ? "（離した通知あり）" : ""}${
+                    bleStatus.noCccd ? " / 互換モード（購読設定なし）" : ""
+                  }`
                 : "このビルドは未対応（再ビルドが必要）"}
               {bleState ? `\n最後の状態: ${bleState} ${bleDetail ?? ""}` : ""}
             </Text>
